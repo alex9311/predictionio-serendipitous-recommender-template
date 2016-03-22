@@ -19,7 +19,9 @@ case class PredictedResult(
 
 case class ItemScore(
   item: String,
-  score: Double
+  score: Double,
+  title: String,
+  category: String
 ) extends Serializable
 
 object SimilarProductEngine extends IEngineFactory {
