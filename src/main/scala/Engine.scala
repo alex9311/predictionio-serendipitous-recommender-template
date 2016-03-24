@@ -4,7 +4,7 @@ import io.prediction.controller.IEngineFactory
 import io.prediction.controller.Engine
 
 case class Query(
-  items: List[String],
+  user: String,
   num: Int,
   categories: Option[Set[String]],
   whiteList: Option[Set[String]],
@@ -30,8 +30,7 @@ object SimilarProductEngine extends IEngineFactory {
       classOf[DataSource],
       classOf[Preparator],
       Map(
-        "als" -> classOf[ALSAlgorithm],
-        "cooccurrence" -> classOf[CooccurrenceAlgorithm]),
+        "als" -> classOf[ALSAlgorithm]),
       classOf[Serving])
   }
 }

@@ -6,8 +6,11 @@ import io.prediction.data.storage.BiMap
 
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
+import org.apache.spark.rdd.RDD
 import org.apache.spark.mllib.recommendation.ALS
 import org.apache.spark.mllib.recommendation.{Rating => MLlibRating}
+
+import org.apache.spark.mllib.recommendation.ALSModel
 
 import grizzled.slf4j.Logger
 
@@ -18,24 +21,6 @@ case class ALSAlgorithmParams(
   numIterations: Int,
   lambda: Double,
   seed: Option[Long]) extends Params
-
-class ALSModel(
-  val productFeatures: Map[Int, Array[Double]],
-  val itemStringIntMap: BiMap[String, Int],
-  val items: Map[Int, Item]
-) extends Serializable {
-
-  @transient lazy val itemIntStringMap = itemStringIntMap.inverse
-
-  override def toString = {
-    s" productFeatures: [${productFeatures.size}]" +
-    s"(${productFeatures.take(2).toList}...)" +
-    s" itemStringIntMap: [${itemStringIntMap.size}]" +
-    s"(${itemStringIntMap.take(2).toString}...)]" +
-    s" items: [${items.size}]" +
-    s"(${items.take(2).toString}...)]"
-  }
-}
 
 /**
   * Use ALS to build item x feature matrix
@@ -50,10 +35,6 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       s"viewEvents in PreparedData cannot be empty." +
       " Please check if DataSource generates TrainingData" +
       " and Preprator generates PreparedData correctly.")
-    /*require(!data.users.take(1).isEmpty,
-      s"users in PreparedData cannot be empty." +
-      " Please check if DataSource generates TrainingData" +
-      " and Preprator generates PreparedData correctly.")*/
     require(!data.items.take(1).isEmpty,
       s"items in PreparedData cannot be empty." +
       " Please check if DataSource generates TrainingData" +
@@ -111,75 +92,38 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       seed = seed)
 
     new ALSModel(
-      productFeatures = m.productFeatures.collectAsMap.toMap,
+      rank = m.rank,
+      productFeatures = m.productFeatures,
+      userFeatures = m.userFeatures,
       itemStringIntMap = itemStringIntMap,
+      userStringIntMap = userStringIntMap,
       items = items
     )
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
-
-    val productFeatures = model.productFeatures
-
-    // convert items to Int index
-    val queryList: Set[Int] = query.items.map(model.itemStringIntMap.get(_))
-      .flatten.toSet
-
-    val queryFeatures: Vector[Array[Double]] = queryList.toVector
-      // productFeatures may not contain the requested item
-      .map { item => productFeatures.get(item) }
-      .flatten
-
-    val whiteList: Option[Set[Int]] = query.whiteList.map( set =>
-      set.map(model.itemStringIntMap.get(_)).flatten
-    )
-    val blackList: Option[Set[Int]] = query.blackList.map ( set =>
-      set.map(model.itemStringIntMap.get(_)).flatten
-    )
-
-    val ord = Ordering.by[(Int, Double), Double](_._2).reverse
-
-    val indexScores: Array[(Int, Double)] = if (queryFeatures.isEmpty) {
-      logger.info(s"No productFeatures vector for query items ${query.items}.")
-      Array[(Int, Double)]()
-    } else {
-      productFeatures.par // convert to parallel collection
-        .mapValues { f =>
-          queryFeatures.map{ qf =>
-            cosine(qf, f)
-          }.reduce(_ + _)
-        }
-        .filter(_._2 > 0) // keep items with score > 0
-        .seq // convert back to sequential collection
-        .toArray
+  // Convert String ID to Int index for Mllib
+    model.userStringIntMap.get(query.user).map { userInt =>
+      // create inverse view of itemStringIntMap
+      val itemIntStringMap = model.itemStringIntMap.inverse
+      // recommendProducts() returns Array[MLlibRating], which uses item Int
+      // index. Convert it to String ID for returning PredictedResult
+      val itemScores = model.recommendProducts(userInt, query.num)
+          .map { r  =>
+            val it = model.items(r.product)
+            new ItemScore(
+            title = it.title,
+            category = it.category,
+            item = itemIntStringMap(r.product),
+            score = r.rating
+          )}
+      new PredictedResult(itemScores)
+    }.getOrElse{
+      logger.info(s"No prediction for unknown user ${query.user}.")
+      new PredictedResult(Array.empty)
     }
-
-    val filteredScore = indexScores.view.filter { case (i, v) =>
-      isCandidateItem(
-        i = i,
-        items = model.items,
-        categories = query.categories,
-        queryList = queryList,
-        whiteList = whiteList,
-        blackList = blackList
-      )
-    }
-
-    val topScores = getTopN(filteredScore, query.num)(ord).toArray
-
-    val itemScores = topScores.map { case (i, s) =>
-      val it = model.items(i)
-      new ItemScore(
-        title = it.title,
-        category = it.category,
-        item = model.itemIntStringMap(i),
-        score = s
-      )
-    }
-
-    new PredictedResult(itemScores)
   }
-
+/*
   private
   def getTopN[T](s: Seq[T], n: Int)(implicit ord: Ordering[T]): Seq[T] = {
 
@@ -237,6 +181,6 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
         !(itemCat.toSet.intersect(cat).isEmpty)
       }.getOrElse(false) // discard this item if it has no categories
     }.getOrElse(true)
-  }
+  }*/
 
 }
