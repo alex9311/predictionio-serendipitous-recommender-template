@@ -1,10 +1,26 @@
-# Similar Product Template
+# Customized Collaborative Recommender Template
 
 ## Documentation
 
-Please refer to http://docs.prediction.io/templates/similarproduct/quickstart/
+##Customization Description
+The original template from PredictionIO used here was the [similar product recommender](https://templates.prediction.io/PredictionIO/template-scala-parallel-similarproduct). From this, several changes have been made.
+
+####Method of generating recommendations
+The original template accepts an item as input and finds the other items with the most similar rating vectors in the predicted matrix. This customized version calculates trains the matrix in the same way but takes a user as input and returns the items with the highest predicted rating. This is how recommendations in the [basic recommendation template](https://templates.prediction.io/PredictionIO/template-scala-parallel-recommendation) are made.
+
+####Item Properties
+This template adds item properties. An item now has a title and category. [PredictionIO example code and guide](https://github.com/PredictionIO/PredictionIO/blob/develop/examples/scala-parallel-similarproduct/add-and-return-item-properties/README.md) was followed to make this change to the code
+
+####No need to set users
+In the original template, a user needed to be "set" before sending events for that user. This customization does not have that, only items need to be declared before sending events that use them. [PredictionIO example code and guide](https://github.com/PredictionIO/PredictionIO/tree/develop/examples/scala-parallel-similarproduct/no-set-user) was used to make this change.
+
+####Already-viewed items blacklist
+Users will only be recommended items which they have not previously viewed (according to the view events in the event database). [A PredictionIO guide](https://docs.prediction.io/templates/recommendation/blacklist-items/) and code from the [ecommerce template](https://github.com/PredictionIO/template-scala-parallel-ecommercerecommendation) was used as example.
 
 ## Versions
+### v0.3.3
+
+- Version used to apply customizations from this fork
 
 ### v0.3.2
 
@@ -45,75 +61,3 @@ Please refer to http://docs.prediction.io/templates/similarproduct/quickstart/
 ### v0.1.0
 
 - initial version
-
-
-## Development Notes
-
-### import sample data
-
-```
-$ python data/import_eventserver.py --access_key <your_access_key>
-```
-
-### sample query
-
-normal:
-
-```
-curl -H "Content-Type: application/json" \
--d '{ "items": ["i1", "i3", "i10", "i2", "i5", "i31", "i9"], "num": 10}' \
-http://localhost:8000/queries.json \
--w %{time_connect}:%{time_starttransfer}:%{time_total}
-```
-
-```
-curl -H "Content-Type: application/json" \
--d '{
-  "items": ["i1", "i3", "i10", "i2", "i5", "i31", "i9"],
-  "num": 10,
-  "categories" : ["c4", "c3"]
-}' \
-http://localhost:8000/queries.json \
--w %{time_connect}:%{time_starttransfer}:%{time_total}
-```
-
-```
-curl -H "Content-Type: application/json" \
--d '{
-  "items": ["i1", "i3", "i10", "i2", "i5", "i31", "i9"],
-  "num": 10,
-  "whiteList": ["i21", "i26", "i40"]
-}' \
-http://localhost:8000/queries.json \
--w %{time_connect}:%{time_starttransfer}:%{time_total}
-```
-
-```
-curl -H "Content-Type: application/json" \
--d '{
-  "items": ["i1", "i3", "i10", "i2", "i5", "i31", "i9"],
-  "num": 10,
-  "blackList": ["i21", "i26", "i40"]
-}' \
-http://localhost:8000/queries.json \
--w %{time_connect}:%{time_starttransfer}:%{time_total}
-```
-
-unknown item:
-
-```
-curl -H "Content-Type: application/json" \
--d '{ "items": ["unk1", "i3", "i10", "i2", "i5", "i31", "i9"], "num": 10}' \
-http://localhost:8000/queries.json \
--w %{time_connect}:%{time_starttransfer}:%{time_total}
-```
-
-
-all unknown items:
-
-```
-curl -H "Content-Type: application/json" \
--d '{ "items": ["unk1", "unk2", "unk3", "unk4"], "num": 10}' \
-http://localhost:8000/queries.json \
--w %{time_connect}:%{time_starttransfer}:%{time_total}
-```
