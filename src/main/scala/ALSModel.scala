@@ -14,6 +14,8 @@ import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 
+import org.jblas.DoubleMatrix
+
 
 class ALSModel(
     override val rank: Int,
@@ -51,6 +53,27 @@ class ALSModel(
     s" items: [${items.size}]" +
     s"(${items.take(2)}...)"
   }
+  def recommendProductsWithFilter(
+      user: Int,
+      num: Int,
+      productIdFilter: Set[Int]) = {
+    val filteredProductFeatures = productFeatures
+      .filter(features => !productIdFilter.contains(features._1)) // (*)
+    recommend(userFeatures.lookup(user).head, filteredProductFeatures, num)
+      .map(t => Rating(user, t._1, t._2))
+  }
+
+  private def recommend(
+      recommendToFeatures: Array[Double],
+      recommendableFeatures: RDD[(Int, Array[Double])],
+      num: Int): Array[(Int, Double)] = {
+    val recommendToVector = new DoubleMatrix(recommendToFeatures)
+    val scored = recommendableFeatures.map { case (id,features) =>
+      (id, recommendToVector.dot(new DoubleMatrix(features)))
+    }
+    scored.top(num)(Ordering.by(_._2))
+  }
+
 }
 
 object ALSModel

@@ -3,6 +3,8 @@ package org.template.similarproduct
 import io.prediction.controller.P2LAlgorithm
 import io.prediction.controller.Params
 import io.prediction.data.storage.BiMap
+import io.prediction.data.storage.Event
+import io.prediction.data.store.LEventStore
 
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
@@ -15,8 +17,10 @@ import org.apache.spark.mllib.recommendation.ALSModel
 import grizzled.slf4j.Logger
 
 import scala.collection.mutable.PriorityQueue
+import scala.concurrent.duration.Duration
 
 case class ALSAlgorithmParams(
+  appName: String,
   rank: Int,
   numIterations: Int,
   lambda: Double,
@@ -102,13 +106,16 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
+    val blackList: Set[Int] = genBlackList(query = query)
+      .flatMap(x=>model.itemStringIntMap.get(x))
   // Convert String ID to Int index for Mllib
     model.userStringIntMap.get(query.user).map { userInt =>
       // create inverse view of itemStringIntMap
       val itemIntStringMap = model.itemStringIntMap.inverse
       // recommendProducts() returns Array[MLlibRating], which uses item Int
       // index. Convert it to String ID for returning PredictedResult
-      val itemScores = model.recommendProducts(userInt, query.num)
+      val itemScores = model
+        .recommendProductsWithFilter(userInt, query.num, blackList)
           .map { r  =>
             val it = model.items(r.product)
             new ItemScore(
@@ -118,10 +125,53 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
             score = r.rating
           )}
       new PredictedResult(itemScores)
+
     }.getOrElse{
       logger.info(s"No prediction for unknown user ${query.user}.")
       new PredictedResult(Array.empty)
     }
   }
+  def genBlackList(query: Query): Set[String] = {
+    // if unseenOnly is True, get all seen items
+    val seenItems: Set[String] = if (true) {
 
+      // get all user item events which are considered as "seen" events
+      val seenEvents: Iterator[Event] = try {
+	logger.error(s"appName: ${ap.appName}")
+	logger.error(s"entityId: ${query.user}")
+        LEventStore.findByEntity(
+          appName = ap.appName,
+          entityType = "user",
+          entityId = query.user,
+          eventNames = Some(List("view")),
+          targetEntityType = Some(Some("item")),
+          // set time limit to avoid super long DB access
+          timeout = Duration(2000, "millis")
+        )
+      } catch {
+        case e: scala.concurrent.TimeoutException =>
+          logger.error(s"Timeout when read seen events." +
+            s" Empty list is used. ${e}")
+          Iterator[Event]()
+        case e: Exception =>
+          logger.error(s"Error when read seen events: ${e}")
+          throw e
+      }
+
+      seenEvents.map { event =>
+        try {
+          event.targetEntityId.get
+        } catch {
+          case e => {
+            logger.error(s"Can't get targetEntityId of event ${event}.")
+            throw e
+          }
+        }
+      }.toSet
+    } else {
+      Set[String]()
+    }
+    logger.error(seenItems.mkString(", "))
+    seenItems
+  }
 }
