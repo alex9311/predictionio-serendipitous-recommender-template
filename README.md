@@ -1,7 +1,4 @@
 # Customized Collaborative Recommender Template
-
-## Documentation
-
 ##Customization Description
 The original template from PredictionIO used here was the [similar product recommender](https://templates.prediction.io/PredictionIO/template-scala-parallel-similarproduct). From this, several changes have been made.
 
