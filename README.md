@@ -11,8 +11,12 @@ This template adds item properties. An item now has a title and category. [Predi
 ####No need to set users
 In the original template, a user needed to be "set" before sending events for that user. This customization does not have that, only items need to be declared before sending events that use them. [PredictionIO example code and guide](https://github.com/PredictionIO/PredictionIO/tree/develop/examples/scala-parallel-similarproduct/no-set-user) was used to make this change.
 
-####Already-viewed items blacklist
-Users will only be recommended items which they have not previously viewed (according to the view events in the event database). [A PredictionIO guide](https://docs.prediction.io/templates/recommendation/blacklist-items/) and code from the [ecommerce template](https://github.com/PredictionIO/template-scala-parallel-ecommercerecommendation) was used as example.
+####Only unseen items option
+Users will only be recommended items which they have not previously viewed (according to the view events in the event database), if the query provides `unseenOnly:true`. [A PredictionIO guide](https://docs.prediction.io/templates/recommendation/blacklist-items/) and code from the [ecommerce template](https://github.com/PredictionIO/template-scala-parallel-ecommercerecommendation) was used as example.
+
+####Blacklist
+Standard blacklist, passed as array in the query. Used a method similar to what is described in [a predictionio guide](https://docs.prediction.io/templates/recommendation/blacklist-items/).
+
 
 ## Versions
 ### v0.3.3
