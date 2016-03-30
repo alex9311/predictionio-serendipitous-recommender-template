@@ -106,7 +106,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
-    val blackList: Set[Int] = genBlackList(query = query)
+    val convertedBlackList: Set[Int] = genBlackList(query = query)
       .flatMap(x=>model.itemStringIntMap.get(x))
   // Convert String ID to Int index for Mllib
     model.userStringIntMap.get(query.user).map { userInt =>
@@ -115,7 +115,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       // recommendProducts() returns Array[MLlibRating], which uses item Int
       // index. Convert it to String ID for returning PredictedResult
       val itemScores = model
-        .recommendProductsWithFilter(userInt, query.num, blackList)
+        .recommendProductsWithFilter(userInt, query.num,convertedBlackList)
           .map { r  =>
             val it = model.items(r.product)
             new ItemScore(
@@ -133,12 +133,10 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
   }
   def genBlackList(query: Query): Set[String] = {
     // if unseenOnly is True, get all seen items
-    val seenItems: Set[String] = if (true) {
+    val seenItems: Set[String] = if (query.unseenOnly) {
 
       // get all user item events which are considered as "seen" events
       val seenEvents: Iterator[Event] = try {
-	logger.error(s"appName: ${ap.appName}")
-	logger.error(s"entityId: ${query.user}")
         LEventStore.findByEntity(
           appName = ap.appName,
           entityType = "user",
@@ -171,7 +169,6 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
     } else {
       Set[String]()
     }
-    logger.error(seenItems.mkString(", "))
-    seenItems
+    query.blackList.getOrElse(Set[String]()) ++ seenItems
   }
 }
