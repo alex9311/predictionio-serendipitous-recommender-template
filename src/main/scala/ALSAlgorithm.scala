@@ -124,6 +124,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
             item = itemIntStringMap(r.product),
             score = r.rating
           )}
+      logger.info(s"Made prediction for user ${query.user}: ${itemScores mkString}.")
       new PredictedResult(itemScores)
 
     }.getOrElse{
