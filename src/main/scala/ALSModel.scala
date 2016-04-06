@@ -4,7 +4,7 @@ package org.apache.spark.mllib.recommendation
 // its constructor in order to save and load the model
 
 import org.template.serendipitous.ALSAlgorithmParams
-import org.template.serendipitous.evaldev._
+import org.template.serendipitous._
 
 import io.prediction.controller.IPersistentModel
 import io.prediction.controller.IPersistentModelLoader
