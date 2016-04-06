@@ -1,4 +1,4 @@
-package org.template.similarproduct
+package org.template.serendipitous
 
 import io.prediction.controller.P2LAlgorithm
 import io.prediction.controller.Params
@@ -11,6 +11,7 @@ import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.mllib.recommendation.ALS
 import org.apache.spark.mllib.recommendation.{Rating => MLlibRating}
+import org.apache.spark.graphx._
 
 import org.apache.spark.mllib.recommendation.ALSModel
 
@@ -35,6 +36,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
   @transient lazy val logger = Logger[this.type]
 
   def train(sc: SparkContext, data: PreparedData): ALSModel = {
+    logger.info(s"graph!!!! in model training ${data.graph.numEdges.toString}")
     require(!data.viewEvents.take(1).isEmpty,
       s"viewEvents in PreparedData cannot be empty." +
       " Please check if DataSource generates TrainingData" +
@@ -95,13 +97,15 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       alpha = 1.0,
       seed = seed)
 
+      
     new ALSModel(
       rank = m.rank,
       productFeatures = m.productFeatures,
       userFeatures = m.userFeatures,
       itemStringIntMap = itemStringIntMap,
       userStringIntMap = userStringIntMap,
-      items = items
+      items = items,
+      graph = data.graph
     )
   }
 
@@ -124,6 +128,11 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
             item = itemIntStringMap(r.product),
             score = r.rating
           )}
+      try{
+        logger.info(s"graph!!! ${model.graph.numEdges.toString}")
+      }catch{
+        case _:Throwable => logger.info(s"printing graph threw an exception")
+      }
       logger.info(s"Made prediction for user ${query.user}: ${itemScores mkString}.")
       new PredictedResult(itemScores)
 

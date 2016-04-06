@@ -3,8 +3,8 @@ package org.apache.spark.mllib.recommendation
 // MatrixFactorizationModel's constructor is private and we are using
 // its constructor in order to save and load the model
 
-import org.template.similarproduct.ALSAlgorithmParams
-import org.template.similarproduct._
+import org.template.serendipitous.ALSAlgorithmParams
+import org.template.serendipitous.evaldev._
 
 import io.prediction.controller.IPersistentModel
 import io.prediction.controller.IPersistentModelLoader
@@ -13,6 +13,8 @@ import io.prediction.data.storage.BiMap
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
+import org.apache.spark.graphx._
+
 
 import org.jblas.DoubleMatrix
 
@@ -23,7 +25,8 @@ class ALSModel(
     override val productFeatures: RDD[(Int, Array[Double])],
     val userStringIntMap: BiMap[String, Int],
     val itemStringIntMap: BiMap[String, Int],
-    val items: Map[Int, Item])
+    val items: Map[Int, Item],
+    val graph: Graph[Int,Int])
   extends MatrixFactorizationModel(rank, userFeatures, productFeatures)
   with IPersistentModel[ALSAlgorithmParams] {
 
@@ -38,6 +41,8 @@ class ALSModel(
     sc.parallelize(Seq(itemStringIntMap))
       .saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/itemStringIntMap")
     sc.parallelize(Seq(items)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/items")
+    graph.vertices.saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/graphvertices")
+    graph.edges.saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/graphedges")
     true
   }
 
@@ -89,6 +94,7 @@ object ALSModel
       itemStringIntMap = sc.get
         .objectFile[BiMap[String, Int]](s"/home/ubuntu/saved_models/${id}/itemStringIntMap").first,
       items = sc.get
-        .objectFile[Map[Int, Item]](s"/home/ubuntu/saved_models/${id}/items").first)
+        .objectFile[Map[Int, Item]](s"/home/ubuntu/saved_models/${id}/items").first,
+      graph = Graph(sc.get.objectFile(s"/home/ubuntu/saved_models/${id}/graphvertices"),sc.get.objectFile(s"/home/ubuntu/saved_models/${id}/graphedges")))
   }
 }

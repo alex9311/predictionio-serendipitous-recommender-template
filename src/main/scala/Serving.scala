@@ -1,4 +1,4 @@
-package org.template.similarproduct
+package org.template.serendipitous
 
 import io.prediction.controller.LServing
 

@@ -1,4 +1,4 @@
-package org.template.similarproduct
+package org.template.serendipitous
 
 import io.prediction.controller.PDataSource
 import io.prediction.controller.EmptyEvaluationInfo
@@ -10,10 +10,11 @@ import io.prediction.data.store.PEventStore
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
+import org.apache.spark.graphx._
 
 import grizzled.slf4j.Logger
 
-case class DataSourceParams(appName: String) extends Params
+case class DataSourceParams(appName: String, graphEdgelistPath: String) extends Params
 
 class DataSource(val dsp: DataSourceParams)
   extends PDataSource[TrainingData,
@@ -23,6 +24,7 @@ class DataSource(val dsp: DataSourceParams)
 
   override
   def readTraining(sc: SparkContext): TrainingData = {
+    val g = GraphLoader.edgeListFile(sc, dsp.graphEdgelistPath)
 
     // create a RDD of (entityID, Item)
     val itemsRDD: RDD[(String, Item)] = PEventStore.aggregateProperties(
@@ -76,7 +78,8 @@ class DataSource(val dsp: DataSourceParams)
     new TrainingData(
       //users = usersRDD,
       items = itemsRDD,
-      viewEvents = viewEventsRDD
+      viewEvents = viewEventsRDD,
+      graph = g
     )
   }
 }
@@ -94,7 +97,8 @@ case class ViewEvent(user: String, item: String, t: Long)
 class TrainingData(
   //val users: RDD[(String, User)],
   val items: RDD[(String, Item)],
-  val viewEvents: RDD[ViewEvent]
+  val viewEvents: RDD[ViewEvent],
+  val graph: Graph[Int,Int]
 ) extends Serializable {
   override def toString = {
     s"items: [${items.count()} (${items.take(2).toList}...)]" +

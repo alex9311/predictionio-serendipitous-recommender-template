@@ -1,4 +1,4 @@
-package org.template.similarproduct
+package org.template.serendipitous
 
 import io.prediction.controller.IEngineFactory
 import io.prediction.controller.Engine
@@ -23,7 +23,7 @@ case class ItemScore(
   category: String
 ) extends Serializable
 
-object SimilarProductEngine extends IEngineFactory {
+object SerendipitousEngine extends IEngineFactory {
   def apply() = {
     new Engine(
       classOf[DataSource],
