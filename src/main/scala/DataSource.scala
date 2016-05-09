@@ -15,6 +15,8 @@ import org.apache.spark.graphx._
 import scala.collection.mutable
 import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
+import java.io._
+
 
 import grizzled.slf4j.Logger
 
@@ -77,23 +79,6 @@ class DataSource(val dsp: DataSourceParams)
       viewEventsRDD
   }
 
-
-  def combs(rdd:RDD[String],sc:SparkContext):RDD[(String,String)] = {
-    val count = rdd.count
-    if (rdd.count < 2) { 
-        sc.makeRDD[(String,String)](Seq.empty)
-    } else if (rdd.count == 2) {
-        val values = rdd.collect
-        sc.makeRDD[(String,String)](Seq((values(0), values(1))))
-    } else {
-        val elem = rdd.take(1)
-        val elemRdd = sc.makeRDD(elem)
-        val subtracted = rdd.subtract(elemRdd)  
-        val comb = subtracted.map(e  => (elem(0),e))
-        comb.union(combs(subtracted,sc))
-    } 
-  }
-
   override
   def readTraining(sc: SparkContext): TrainingData = {
 
@@ -103,17 +88,17 @@ class DataSource(val dsp: DataSourceParams)
     val viewEventsRDD: RDD[ViewEvent] = getViewEvents(sc)
     println("==========================================viewEventsRDD size:"+viewEventsRDD.count)
 
-    val corpus: RDD[Seq[String]] = {
+    val corpus: RDD[(Long,Array[String])] = {
        viewEventsRDD.map(event => (event.item,event.user))
         .groupByKey() // you will get (itemid , Iterable[userId] )
-        .map{ case(itemid,viewers) => viewers.mkString(" ").split("\\s")}
+        .map{ case(itemid,viewers) => (itemid.toLong, viewers.mkString(" ").split("\\s"))}
     }
     println("==========================================corpus size: "+corpus.count)
     println("==========================================corpus first 5:")
-    corpus.take(5).foreach(println)
+    corpus.take(5).foreach(x=>println(x._2.mkString(" ")))
 
     val termCounts: Array[(String, Long)] =
-        corpus.flatMap(_.map(_ -> 1L)).reduceByKey(_ + _).collect().sortBy(-_._2)
+        corpus.flatMap(_._2.map(_ -> 1L)).reduceByKey(_ + _).collect().sortBy(-_._2)
     println("==========================================termcounts size: "+termCounts.size)
     println("==========================================termcounts:")
     termCounts.foreach{ case(term,count)=>
@@ -126,15 +111,8 @@ class DataSource(val dsp: DataSourceParams)
 
     // Convert documents into term count vectors
     val documents: RDD[(Long, Vector)] =
-        corpus.zipWithIndex.map { case (tokens, id) =>
-            val counts = new mutable.HashMap[Int, Double]()
-            tokens.foreach { term =>
-                if (vocab.contains(term)) {
-                    val idx = vocab(term)
-                    counts(idx) = counts.getOrElse(idx, 0.0) + 1.0
-                }
-            }
-            (id, Vectors.sparse(vocab.size, counts.toSeq))
+        corpus.map { case (id:Long, tokens:Array[String]) =>
+            (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
         }
     // Set LDA parameters
     val numTopics = 10
@@ -152,12 +130,31 @@ class DataSource(val dsp: DataSourceParams)
         println()
     }
 
-   
-    val itemIds:RDD[String] = itemsRDD.map{ case(itemId,item)=>itemId }
-    println("number of items: "+itemIds.count)
-    val edges: RDD[(String,String)] = combs(itemIds,sc)
-    println("number of edges: "+edges.count)
+    ldaModel.save(sc, "myLDAModel")
+    val localLdaModel = DistributedLDAModel.load(sc, "myLDAModel").toLocal
+    val inputdocs: RDD[(Long, Vector)] =
+        corpus.map { case (id:Long, tokens:Array[String]) =>
+            (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
+        }
+    val topicDistributions:collection.Map[Long,Vector] = localLdaModel.topicDistributions(inputdocs).collectAsMap()
+    for((k,v) <- topicDistributions) printf("itemid: %s, topic vector (%s)\n",k,v.toArray.mkString(", "))
+
+    val emptyEdges: RDD[(String,String)] = LdaSimHelpers.combs(corpus.map{case(itemid,tokens)=>itemid.toString},sc)
+    println("number of edges: "+emptyEdges.count)
     
+    val edges: RDD[(String,String,Double)] = {
+      emptyEdges.map{case(item1,item2) => 
+          (item1,item2,LdaSimHelpers.cosineSimilarity(topicDistributions(item1.toLong).toArray,topicDistributions(item2.toLong).toArray))
+      }.filter{ case(item1,item2,weight) => weight<.8 }
+    }
+    
+   LdaSimHelpers.gephiPrint(edges,itemsRDD)
+/*
+    val file = new File("file")
+    val bw = new BufferedWriter(new FileWriter("edges.csv"))
+    bw.write("source,target,weight,type\n")
+    for((item1,item2,weight) <- edges) bw.write(item1+","+item2+","+weight.toString+",Undirected\n")
+    bw.close()*/
 /*
     val edges: RDD[Edge[String]] =
       itemsRDD.map{
@@ -167,9 +164,6 @@ class DataSource(val dsp: DataSourceParams)
     //val g : Graph[Any, String] = Graph.fromEdges(edges, "defaultProperty")
     val g = GraphLoader.edgeListFile(sc, dsp.graphEdgelistPath)
 
-
-
-    // get all "user" "view" "item" events
     new TrainingData(
       items = itemsRDD,
       viewEvents = viewEventsRDD,
