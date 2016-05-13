@@ -10,29 +10,26 @@ import org.apache.spark.mllib.linalg.{Vector, Vectors}
 
 
 object LdaSimHelpers {
-  def gephiPrint(edges:RDD[(String,String,Double)],items:RDD[(String,Item)]) = {
-    val gephiEdges:RDD[String] = edges.map{case(item1,item2,weight)=> item1+","+item2+","+weight.toString+",Undirected\n"}
-    gephiEdges.saveAsTextFile("gephi/edges")
-
+  def gephiPrint(edges:RDD[(Int,Int,Double)],items:RDD[(String,Item)]) = {
+    println("going to output vertices")
     val gephiVertices:RDD[String] = items.map{case(itemid,item)=> itemid+","+item.category+"\n"}
     gephiVertices.saveAsTextFile("gephi/vertices")
+    println("going to output edges")
+    val gephiEdges:RDD[String] = edges.map{case(item1,item2,weight)=> item1.toString+","+item2.toString+","+weight.toString+",Undirected\n"}
+    gephiEdges.saveAsTextFile("gephi/edges")
   }
 
-  def combs(rdd:RDD[String],sc:SparkContext):RDD[(String,String)] = {
-    val count = rdd.count
-    if (rdd.count < 2) { 
-        sc.makeRDD[(String,String)](Seq.empty)
-    } else if (rdd.count == 2) {
-        val values = rdd.collect
-        sc.makeRDD[(String,String)](Seq((values(0), values(1))))
-    } else {
-        val elem = rdd.take(1)
-        val elemRdd = sc.makeRDD(elem)
-        val subtracted = rdd.subtract(elemRdd)  
-        val comb = subtracted.map(e  => (elem(0),e))
-        comb.union(combs(subtracted,sc))
-    } 
+  def calculateEdges(nodes:RDD[(Int,Array[Double])],sc:SparkContext):RDD[(Int,Int,Double)] = {
+    val nodeList = nodes.collect().toList
+    nodes
+      .flatMap(item1 => nodeList
+        .filter(item2 => item2._1 > item1._1)
+        .map(item2 => 
+          (item1._1, item2._1,cosineDistance(item1._2,item2._2)))
+        .filter{case(item1,item2,distance)=> distance < .5}
+    )
   }
+
   def get_termcount(tokens:Array[String],vocab:Map[String,Int]):mutable.HashMap[Int,Double] = {
     val counts = new mutable.HashMap[Int, Double]()
     tokens.foreach { term =>
@@ -43,9 +40,9 @@ object LdaSimHelpers {
     }
     counts
   }
-  def cosineSimilarity(x: Array[Double], y: Array[Double]): Double = {
+  def cosineDistance(x: Array[Double], y: Array[Double]): Double = {
     require(x.size == y.size)
-    dotProduct(x, y)/(magnitude(x) * magnitude(y))
+    1.0 - (dotProduct(x, y)/(magnitude(x) * magnitude(y)))
   }
   def dotProduct(x: Array[Double], y: Array[Double]): Double = {
     (for((a, b) <- x zip y) yield a * b) sum

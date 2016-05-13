@@ -88,74 +88,83 @@ class DataSource(val dsp: DataSourceParams)
     val viewEventsRDD: RDD[ViewEvent] = getViewEvents(sc)
     println("==========================================viewEventsRDD size:"+viewEventsRDD.count)
 
+    //corpus used as source for training docs and input docs
     val corpus: RDD[(Long,Array[String])] = {
        viewEventsRDD.map(event => (event.item,event.user))
         .groupByKey() // you will get (itemid , Iterable[userId] )
+        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 5 }//remove items with less that 5 distinct viewers
         .map{ case(itemid,viewers) => (itemid.toLong, viewers.mkString(" ").split("\\s"))}
     }
     println("==========================================corpus size: "+corpus.count)
-    println("==========================================corpus first 5:")
-    corpus.take(5).foreach(x=>println(x._2.mkString(" ")))
 
+    //get corpus info needed for LDA stuff
     val termCounts: Array[(String, Long)] =
-        corpus.flatMap(_._2.map(_ -> 1L)).reduceByKey(_ + _).collect().sortBy(-_._2)
+        corpus.flatMap(_._2.map(_ -> 1L)).reduceByKey(_ + _).filter(x=> x._2>1).collect().sortBy(-_._2)
     println("==========================================termcounts size: "+termCounts.size)
-    println("==========================================termcounts:")
-    termCounts.foreach{ case(term,count)=>
-        println(term+": "+count)
-    }
-
     val vocabArray: Array[String] =
         termCounts.takeRight(termCounts.size).map(_._1)
     val vocab: Map[String, Int] = vocabArray.zipWithIndex.toMap
 
-    // Convert documents into term count vectors
-    val documents: RDD[(Long, Vector)] =
+    //get graphdocs with their user count vectors
+    val graphdocs: RDD[(Long, Vector)] =
+        corpus
+       //   .filter{case(id:Long,views:Array[String])=>{ ( id.toInt%2 == 0 )}}//filter to make input smaller
+          .map { case (id:Long, tokens:Array[String]) =>
+            (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
+        }
+    println("==========================================graphdocs size: "+graphdocs.count)
+	
+    //Item info for items to be included in graph
+    val graphItems:RDD[(String,Item)] = graphdocs.map{
+      case(itemid:Long,viewers:Vector)=> (itemid.toString,1)
+    }.join(itemsRDD).map{ case(itemid:String,(t:Int,item:Item))=> (itemid,item) }
+    println("==========================================graphItems size:"+graphItems.count)
+
+    //get user counts for all docs in corpus for training set
+    val trainingdocs: RDD[(Long, Vector)] =
         corpus.map { case (id:Long, tokens:Array[String]) =>
             (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
         }
-    // Set LDA parameters
-    val numTopics = 10
-    val ldaModel = new LDA().setK(numTopics).setMaxIterations(20).run(documents)
 
-    //val avgLogLikelihood = ldaModel.asInstanceOf[DistributedLDAModel].logLikelihood / documents.count()
+    // Set LDA parameters
+    val ldaModel = new LDA().setK(80).setMaxIterations(60).run(trainingdocs)
+
+/*
+    for(numTopics<-Seq(60,65,70,75,80);iterations<-Seq(60)) {
+      val ldaModel = new LDA().setK(numTopics).setMaxIterations(iterations).run(trainingdocs)
+      val avgLogLikelihood = ldaModel.asInstanceOf[DistributedLDAModel].logLikelihood / trainingdocs.count()
+      println("============(topics: "+numTopics+", iterations: "+iterations+") avgLogLikelihood: "+avgLogLikelihood)
+    }*/
 
     // Print topics, showing top-weighted 10 terms for each topic.
     val topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 10)
+/*
     topicIndices.foreach { case (terms, termWeights) =>
         println("TOPIC:")
         terms.zip(termWeights).foreach { case (term, weight) =>
              println(s"${vocabArray(term.toInt)}\t$weight")
         }
         println()
-    }
+    }*/
+
 
     ldaModel.save(sc, "myLDAModel")
     val localLdaModel = DistributedLDAModel.load(sc, "myLDAModel").toLocal
-    val inputdocs: RDD[(Long, Vector)] =
-        corpus.map { case (id:Long, tokens:Array[String]) =>
-            (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
-        }
-    val topicDistributions:collection.Map[Long,Vector] = localLdaModel.topicDistributions(inputdocs).collectAsMap()
-    for((k,v) <- topicDistributions) printf("itemid: %s, topic vector (%s)\n",k,v.toArray.mkString(", "))
 
-    val emptyEdges: RDD[(String,String)] = LdaSimHelpers.combs(corpus.map{case(itemid,tokens)=>itemid.toString},sc)
-    println("number of edges: "+emptyEdges.count)
+
+    val topicDistributions:collection.Map[Long,Vector] = localLdaModel.topicDistributions(graphdocs).collectAsMap()
+    //for((k,v) <- topicDistributions) printf("itemid: %s, topic vector (%s)\n",k,v.toArray.mkString(", "))
+    println("finished calculating topic distributions")
     
-    val edges: RDD[(String,String,Double)] = {
-      emptyEdges.map{case(item1,item2) => 
-          (item1,item2,LdaSimHelpers.cosineSimilarity(topicDistributions(item1.toLong).toArray,topicDistributions(item2.toLong).toArray))
-      }.filter{ case(item1,item2,weight) => weight<.8 }
-    }
-    
-   LdaSimHelpers.gephiPrint(edges,itemsRDD)
-/*
-    val file = new File("file")
-    val bw = new BufferedWriter(new FileWriter("edges.csv"))
-    bw.write("source,target,weight,type\n")
-    for((item1,item2,weight) <- edges) bw.write(item1+","+item2+","+weight.toString+",Undirected\n")
-    bw.close()*/
-/*
+    //graphItems.map{case(itemid:String,item:Item)=> (itemid,topicDistributions(itemid.toLong))}.saveAsTextFile("output")
+
+    val edges: RDD[(Int,Int,Double)] = LdaSimHelpers.calculateEdges(graphItems.map{case(itemid:String,item:Item)=>(itemid.toInt,topicDistributions(itemid.toLong).toArray)},sc)
+    println("number of edges: "+edges.count)
+    println("finished calculating edges, going to print")
+
+    LdaSimHelpers.gephiPrint(edges,graphItems)
+
+    /*
     val edges: RDD[Edge[String]] =
       itemsRDD.map{
         x => Edge(x._1, 1, 1)
