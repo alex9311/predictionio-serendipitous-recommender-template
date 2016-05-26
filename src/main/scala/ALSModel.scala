@@ -26,7 +26,8 @@ class ALSModel(
     val userStringIntMap: BiMap[String, Int],
     val itemStringIntMap: BiMap[String, Int],
     val items: Map[Int, Item],
-    val graph: Graph[Int,Int])
+    val userHistories: Map[String, Array[Int]],
+    val graph: Graph[String,Double])
   extends MatrixFactorizationModel(rank, userFeatures, productFeatures)
   with IPersistentModel[ALSAlgorithmParams] {
 
@@ -41,6 +42,7 @@ class ALSModel(
     sc.parallelize(Seq(itemStringIntMap))
       .saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/itemStringIntMap")
     sc.parallelize(Seq(items)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/items")
+    sc.parallelize(Seq(userHistories)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/userHistories")
     graph.vertices.saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/graphvertices")
     graph.edges.saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/graphedges")
     true
@@ -61,7 +63,7 @@ class ALSModel(
   def recommendProductsWithFilter(
       user: Int,
       num: Int,
-      productIdFilter: Set[Int]) = {
+      productIdFilter: Set[Int]): Array[Rating] = {
     val filteredProductFeatures = productFeatures
       .filter(features => !productIdFilter.contains(features._1)) // (*)
     recommend(userFeatures.lookup(user).head, filteredProductFeatures, num)
@@ -95,6 +97,8 @@ object ALSModel
         .objectFile[BiMap[String, Int]](s"/home/ubuntu/saved_models/${id}/itemStringIntMap").first,
       items = sc.get
         .objectFile[Map[Int, Item]](s"/home/ubuntu/saved_models/${id}/items").first,
+      userHistories = sc.get
+        .objectFile[Map[String, Array[Int]]](s"/home/ubuntu/saved_models/${id}/userHistories").first,
       graph = Graph(sc.get.objectFile(s"/home/ubuntu/saved_models/${id}/graphvertices"),sc.get.objectFile(s"/home/ubuntu/saved_models/${id}/graphedges")))
   }
 }

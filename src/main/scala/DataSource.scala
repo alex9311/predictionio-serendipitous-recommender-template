@@ -88,13 +88,15 @@ class DataSource(val dsp: DataSourceParams)
     val viewEventsRDD: RDD[ViewEvent] = getViewEvents(sc)
     println("==========================================viewEventsRDD size:"+viewEventsRDD.count)
 
+
     //corpus used as source for training docs and input docs
     val corpus: RDD[(Long,Array[String])] = {
        viewEventsRDD.map(event => (event.item,event.user))
         .groupByKey() // you will get (itemid , Iterable[userId] )
-        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 5 }//remove items with less that 5 distinct viewers
+        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 2 }//remove items with less that 3 distinct viewers
         .map{ case(itemid,viewers) => (itemid.toLong, viewers.mkString(" ").split("\\s"))}
     }
+
     println("==========================================corpus size: "+corpus.count)
 
     //get corpus info needed for LDA stuff
@@ -105,10 +107,16 @@ class DataSource(val dsp: DataSourceParams)
         termCounts.takeRight(termCounts.size).map(_._1)
     val vocab: Map[String, Int] = vocabArray.zipWithIndex.toMap
 
+    val userHistories: RDD[(String,Array[Int])] = {
+      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toInt))
+      .groupByKey()
+      .map{case(userid:String,items:Iterable[Int]) => (userid,items.toArray.distinct)}
+      .filter{ case(userid,items) => vocab.contains(userid)}
+    }
+
     //get graphdocs with their user count vectors
     val graphdocs: RDD[(Long, Vector)] =
         corpus
-       //   .filter{case(id:Long,views:Array[String])=>{ ( id.toInt%2 == 0 )}}//filter to make input smaller
           .map { case (id:Long, tokens:Array[String]) =>
             (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
         }
@@ -164,18 +172,17 @@ class DataSource(val dsp: DataSourceParams)
 
     LdaSimHelpers.gephiPrint(edges,graphItems)
 
-    /*
-    val edges: RDD[Edge[String]] =
-      itemsRDD.map{
-        x => Edge(x._1, 1, 1)
-      }
-    */
-    //val g : Graph[Any, String] = Graph.fromEdges(edges, "defaultProperty")
-    val g = GraphLoader.edgeListFile(sc, dsp.graphEdgelistPath)
+    val graphEdges: RDD[Edge[Double]] = edges.map {
+      case(item1:Int,item2:Int,weight:Double) => Edge(item1.toLong,item2.toLong,weight)
+    }
+  
+    val g : Graph[String, Double] = Graph.fromEdges(graphEdges,"defaultProperty")
+    //val g = GraphLoader.edgeListFile(sc, dsp.graphEdgelistPath)
 
     new TrainingData(
       items = itemsRDD,
       viewEvents = viewEventsRDD,
+      userHistories = userHistories,
       graph = g
     )
   }
@@ -196,7 +203,8 @@ class TrainingData(
   //val users: RDD[(String, User)],
   val items: RDD[(String, Item)],
   val viewEvents: RDD[ViewEvent],
-  val graph: Graph[Int,Int]
+  val userHistories: RDD[(String,Array[Int])],
+  val graph: Graph[String,Double]
 ) extends Serializable {
   override def toString = {
     s"items: [${items.count()} (${items.take(2).toList}...)]" +

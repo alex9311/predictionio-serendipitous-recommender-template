@@ -15,6 +15,7 @@ class Preparator
     new PreparedData(
       items = trainingData.items,
       viewEvents = trainingData.viewEvents,
+      userHistories = trainingData.userHistories,
       graph = trainingData.graph)
   }
 }
@@ -22,5 +23,6 @@ class Preparator
 class PreparedData(
   val items: RDD[(String, Item)],
   val viewEvents: RDD[ViewEvent],
-  val graph: Graph[Int,Int]
+  val userHistories: RDD[(String,Array[Int])],
+  val graph: Graph[String,Double]
 ) extends Serializable

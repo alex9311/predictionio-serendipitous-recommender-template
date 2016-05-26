@@ -37,6 +37,8 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
 
   def train(sc: SparkContext, data: PreparedData): ALSModel = {
     logger.info(s"graph!!!! in model training ${data.graph.numEdges.toString}")
+    logger.info(s"edges: ${data.graph.numEdges.toString}")
+    logger.info(s"nodes: ${data.graph.numVertices.toString}")
     require(!data.viewEvents.take(1).isEmpty,
       s"viewEvents in PreparedData cannot be empty." +
       " Please check if DataSource generates TrainingData" +
@@ -97,6 +99,8 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       alpha = 1.0,
       seed = seed)
 
+    val userHistoriesMap = data.userHistories.collectAsMap.toMap
+    logger.info(s"!!!!!!! userHistoriesMap count: ${userHistoriesMap.keySet.size}")
       
     new ALSModel(
       rank = m.rank,
@@ -105,11 +109,17 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       itemStringIntMap = itemStringIntMap,
       userStringIntMap = userStringIntMap,
       items = items,
+      userHistories = userHistoriesMap,
       graph = data.graph
     )
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
+    val userHistory:Array[Int] = model.userHistories(query.user)
+    //logger.info(s"user history for user ${query.user}: ${userHistory.mkString(", ")}.")
+    //logger.info(s"full graph edge count ${model.graph.edges.count}")
+    
+    //val subgraph = model.graph.subgraph
     val convertedBlackList: Set[Int] = genBlackList(query = query)
       .flatMap(x=>model.itemStringIntMap.get(x))
   // Convert String ID to Int index for Mllib
@@ -118,8 +128,8 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       val itemIntStringMap = model.itemStringIntMap.inverse
       // recommendProducts() returns Array[MLlibRating], which uses item Int
       // index. Convert it to String ID for returning PredictedResult
-      val itemScores = model
-        .recommendProductsWithFilter(userInt, query.num,convertedBlackList)
+      val itemScores:Array[ItemScore] = model
+        .recommendProductsWithFilter(userInt, 10,convertedBlackList)
           .map { r  =>
             val it = model.items(r.product)
             new ItemScore(
@@ -128,13 +138,38 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
             item = itemIntStringMap(r.product),
             score = r.rating
           )}
-      try{
-        logger.info(s"graph!!! ${model.graph.numEdges.toString}")
-      }catch{
-        case _:Throwable => logger.info(s"printing graph threw an exception")
-      }
+
       logger.info(s"Made prediction for user ${query.user}: ${itemScores mkString}.")
-      new PredictedResult(itemScores)
+      logger.info(s"userHistory size: (${query.user}):${userHistory.size}")
+      logger.info(s"userHistory: (${query.user}): (${userHistory.mkString("), (")})")
+
+      val predictedTriangles: Array[(ItemScore,Int)] = itemScores.map{score => {
+        val predictedItem = score.item.toInt
+        val graphItems: Array[Int] = userHistory :+ predictedItem  
+        val subgraph = model.graph.subgraph(vpred = (id,attr) => graphItems contains id.toInt)
+	val triCounts = subgraph.triangleCount().vertices
+	logger.info(s"subgraph edges (${predictedItem.toString}):${subgraph.edges.count}")
+        subgraph.edges.foreach( edge => logger.info(s"${edge.toString}"))
+
+	logger.info(s"subgraph vertices (${predictedItem.toString}):${subgraph.vertices.count}")
+        subgraph.vertices.foreach( vert => logger.info(s"${vert.toString}"))
+
+	logger.info(s"triCount vertices ${triCounts.count}")
+        val count = triCounts.filter{case(item,count)=> {item.toInt == predictedItem}}.map{case(item,count)=>count}.first
+        logger.info(s"(${predictedItem},${count})")
+        (score,count)
+      }}.toArray
+
+      logger.info(s"predictedTriangles:")
+      
+
+      val boostedScores:Array[(ItemScore,Int)] = predictedTriangles.sortWith(_._2 < _._2)
+      boostedScores.foreach( tri => logger.info(s"${tri.toString}"))
+
+      //val edgeStrings:RDD[String] = subgraph.edges.map(edge=>edge.srcId.toString+","+edge.dstId.toString+","+edge.attr+",Undirected")
+      //edgeStrings.saveAsTextFile("edges_subgraph")
+
+      new PredictedResult(boostedScores.take(query.num).map{case(item,triangles)=> {item}})
 
     }.getOrElse{
       logger.info(s"No prediction for unknown user ${query.user}.")
