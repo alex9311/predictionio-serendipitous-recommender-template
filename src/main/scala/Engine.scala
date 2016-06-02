@@ -7,7 +7,10 @@ case class Query(
   user: String,
   num: Int,
   unseenOnly:Boolean,
-  blackList: Option[Set[String]]
+  recentOnly:Boolean,
+  serendip:Boolean,
+  blackList: Option[Set[String]],
+  recentDate: Option[String]
 ) extends Serializable
 
 case class PredictedResult(
@@ -20,6 +23,7 @@ case class ItemScore(
   item: String,
   score: Double,
   title: String,
+  date_created: String,
   category: String
 ) extends Serializable
 

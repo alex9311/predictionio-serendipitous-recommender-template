@@ -28,28 +28,6 @@ class DataSource(val dsp: DataSourceParams)
 
   @transient lazy val logger = Logger[this.type]
 
-  def getItems(sc: SparkContext): RDD[(String, Item)] = {
-    val itemsRDD: RDD[(String, Item)] = PEventStore.aggregateProperties(
-      appName = dsp.appName,
-      entityType = "item"
-    )(sc).map { case (entityId, properties) =>
-      val item = try {
-        Item(
-          category= properties.get[String]("category"),
-          title= properties.get[String]("title"),
-          date_created= properties.get[String]("date_created"),
-          categories = properties.getOpt[List[String]]("categories")) 
-      } catch {
-        case e: Exception => {
-          logger.error(s"Failed to get properties ${properties} of" +
-            s" item ${entityId}. Exception: ${e}.")
-          throw e
-        }
-      }
-      (entityId, item)
-    }.cache()
-    itemsRDD
-  }
   def getViewEvents(sc:SparkContext): RDD[ViewEvent] = {
     val viewEventsRDD: RDD[ViewEvent] = PEventStore.find(
       appName = dsp.appName,
@@ -77,6 +55,29 @@ class DataSource(val dsp: DataSourceParams)
         viewEvent
       }.cache()
       viewEventsRDD
+  }
+
+  def getItems(sc: SparkContext): RDD[(String, Item)] = {
+    val itemsRDD: RDD[(String, Item)] = PEventStore.aggregateProperties(
+      appName = dsp.appName,
+      entityType = "item"
+    )(sc).map { case (entityId, properties) =>
+      val item = try {
+        Item(
+          category= properties.get[String]("category"),
+          title= properties.get[String]("title"),
+          date_created= properties.get[String]("date_created"),
+          categories = properties.getOpt[List[String]]("categories")) 
+      } catch {
+        case e: Exception => {
+          logger.error(s"Failed to get properties ${properties} of" +
+            s" item ${entityId}. Exception: ${e}.")
+          throw e
+        }
+      }
+      (entityId, item)
+    }.cache()
+    itemsRDD
   }
 
   override
@@ -107,11 +108,12 @@ class DataSource(val dsp: DataSourceParams)
         termCounts.takeRight(termCounts.size).map(_._1)
     val vocab: Map[String, Int] = vocabArray.zipWithIndex.toMap
 
-    val userHistories: RDD[(String,Array[Int])] = {
-      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toInt))
+    val userHistories: Map[String,Array[Long]] = {
+      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toLong))
       .groupByKey()
-      .map{case(userid:String,items:Iterable[Int]) => (userid,items.toArray.distinct)}
+      .map{case(userid:String,items:Iterable[Long]) => (userid,items.toArray.distinct)}
       .filter{ case(userid,items) => vocab.contains(userid)}
+      .collect().toMap
     }
 
     //get graphdocs with their user count vectors
@@ -135,8 +137,7 @@ class DataSource(val dsp: DataSourceParams)
         }
 
     // Set LDA parameters
-    val ldaModel = new LDA().setK(80).setMaxIterations(60).run(trainingdocs)
-
+    //val ldaModel = new LDA().setK(80).setMaxIterations(60).run(trainingdocs)//this stuff
 /*
     for(numTopics<-Seq(60,65,70,75,80);iterations<-Seq(60)) {
       val ldaModel = new LDA().setK(numTopics).setMaxIterations(iterations).run(trainingdocs)
@@ -145,7 +146,7 @@ class DataSource(val dsp: DataSourceParams)
     }*/
 
     // Print topics, showing top-weighted 10 terms for each topic.
-    val topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 10)
+    //val topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 10) //this one too
 /*
     topicIndices.foreach { case (terms, termWeights) =>
         println("TOPIC:")
@@ -156,9 +157,8 @@ class DataSource(val dsp: DataSourceParams)
     }*/
 
 
-    ldaModel.save(sc, "myLDAModel")
+    //ldaModel.save(sc, "myLDAModel") //and this one
     val localLdaModel = DistributedLDAModel.load(sc, "myLDAModel").toLocal
-
 
     val topicDistributions:collection.Map[Long,Vector] = localLdaModel.topicDistributions(graphdocs).collectAsMap()
     //for((k,v) <- topicDistributions) printf("itemid: %s, topic vector (%s)\n",k,v.toArray.mkString(", "))
@@ -170,14 +170,13 @@ class DataSource(val dsp: DataSourceParams)
     println("number of edges: "+edges.count)
     println("finished calculating edges, going to print")
 
-    LdaSimHelpers.gephiPrint(edges,graphItems)
+    //LdaSimHelpers.gephiPrint(edges,graphItems)
 
     val graphEdges: RDD[Edge[Double]] = edges.map {
       case(item1:Int,item2:Int,weight:Double) => Edge(item1.toLong,item2.toLong,weight)
     }
   
     val g : Graph[String, Double] = Graph.fromEdges(graphEdges,"defaultProperty")
-    //val g = GraphLoader.edgeListFile(sc, dsp.graphEdgelistPath)
 
     new TrainingData(
       items = itemsRDD,
@@ -190,7 +189,6 @@ class DataSource(val dsp: DataSourceParams)
 
 case class User()
 
-//case class Item(categories: Option[List[String]])
 case class Item(
     title: String,
     category: String,
@@ -200,10 +198,9 @@ case class Item(
 case class ViewEvent(user: String, item: String, t: Long)
 
 class TrainingData(
-  //val users: RDD[(String, User)],
   val items: RDD[(String, Item)],
   val viewEvents: RDD[ViewEvent],
-  val userHistories: RDD[(String,Array[Int])],
+  val userHistories: Map[String,Array[Long]],
   val graph: Graph[String,Double]
 ) extends Serializable {
   override def toString = {

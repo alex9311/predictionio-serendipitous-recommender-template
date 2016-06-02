@@ -4,6 +4,8 @@ import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.graphx._
+import org.apache.spark.graphx.lib._
+import scala.reflect.ClassTag
 import scala.collection.mutable
 import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
@@ -51,4 +53,14 @@ object LdaSimHelpers {
   def magnitude(x: Array[Double]): Double = {
     math.sqrt(x map(i => i*i) sum)
   }
+
+  def findTriangles(id:Int,subgraph:Graph[String,Double]): Int = {
+        println(s"++++++++++++++++++++++++++++++++graph edge count from findTriangles for ${id.toString}: ${subgraph.edges.count}")
+        println(s"++++++++++++++++++++++++++++++++graph vertice count from findTriangles for ${id.toString}: ${subgraph.vertices.count}")
+        val triCounts = subgraph.triangleCount().vertices
+        val count:Int = triCounts.filter{case(item,count)=> {item.toInt == id}}.map{case(item,count)=>count}.first
+        println(s"++++++++++++++++++++++++++++++++triangle count from findTriangles for ${id.toString}: ${count.toString}")
+        count
+  }
+
 }

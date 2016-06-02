@@ -12,6 +12,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.mllib.recommendation.ALS
 import org.apache.spark.mllib.recommendation.{Rating => MLlibRating}
 import org.apache.spark.graphx._
+import org.apache.spark.graphx.lib._
 
 import org.apache.spark.mllib.recommendation.ALSModel
 
@@ -19,6 +20,12 @@ import grizzled.slf4j.Logger
 
 import scala.collection.mutable.PriorityQueue
 import scala.concurrent.duration.Duration
+
+
+case class ProductModel(
+  item: Item,
+  features: Option[Array[Double]]
+)
 
 case class ALSAlgorithmParams(
   appName: String,
@@ -36,9 +43,6 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
   @transient lazy val logger = Logger[this.type]
 
   def train(sc: SparkContext, data: PreparedData): ALSModel = {
-    logger.info(s"graph!!!! in model training ${data.graph.numEdges.toString}")
-    logger.info(s"edges: ${data.graph.numEdges.toString}")
-    logger.info(s"nodes: ${data.graph.numVertices.toString}")
     require(!data.viewEvents.take(1).isEmpty,
       s"viewEvents in PreparedData cannot be empty." +
       " Please check if DataSource generates TrainingData" +
@@ -49,13 +53,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       " and Preprator generates PreparedData correctly.")
     // create User and item's String ID to integer index BiMap
     val userStringIntMap = BiMap.stringInt(data.viewEvents.map(_.user))
-    //val userStringIntMap = BiMap.stringInt(data.users.keys)
     val itemStringIntMap = BiMap.stringInt(data.items.keys)
-
-    // collect Item as Map and convert ID to Int index
-    val items: Map[Int, Item] = data.items.map { case (id, item) =>
-      (itemStringIntMap(id), item)
-    }.collectAsMap.toMap
 
     val mllibRatings = data.viewEvents
       .map { r =>
@@ -99,83 +97,155 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       alpha = 1.0,
       seed = seed)
 
-    val userHistoriesMap = data.userHistories.collectAsMap.toMap
-    logger.info(s"!!!!!!! userHistoriesMap count: ${userHistoriesMap.keySet.size}")
-      
+    val items = data.items.map { case (id, item) =>
+      (itemStringIntMap(id), item)
+    }
+
+    val productFeatures: Map[Int, (Item, Option[Array[Double]])] =
+      items.leftOuterJoin(m.productFeatures).collectAsMap.toMap
+
+    val productModels: Map[Int, ProductModel] = productFeatures
+      .map { case (index, (item, features)) =>
+        val pm = ProductModel(
+          item = item,
+          features = features
+        )
+        (index, pm)
+      }
+
+    val stubPreparedRecs: scala.collection.immutable.Map[String,Array[ItemScore]] = 
+      data.viewEvents.map(viewEvent =>(viewEvent.user,viewEvent.item.toInt))
+        .groupByKey()
+        .map{case(userid:String,items:Iterable[Int]) => { 
+          (userid,Array(ItemScore("item",1.0,"title","date","category")))
+        }}
+      .collect()
+      .toMap
+    
+    logger.info(s"creating stub model")
+
+    val model = new ALSModel(
+      rank = m.rank,
+      productFeatures = m.productFeatures,
+      userFeatures = m.userFeatures,
+      productModels = productModels,
+      preparedRecs = stubPreparedRecs,
+      itemStringIntMap = itemStringIntMap,
+      userStringIntMap = userStringIntMap,
+      items = items.collectAsMap.toMap
+    )
+    
+    logger.info(s"finished creating stub model")
+    logger.info(s"creating prepared recs")
+
+    val users: Array[String] = data.viewEvents.map(viewEvent => (viewEvent.user)).collect.distinct
+
+    logger.info(s"calculating neighbor map")
+    val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.edges
+      .flatMap{ edge => List((edge.srcId,edge.dstId),(edge.dstId,edge.srcId)) }
+      .groupByKey
+      .map{case(edge,neighbors)=>(edge,neighbors.toArray)}
+      .collect.toMap
+    }
+
+    logger.info(s"calculating potentialRecs")
+    val userBaselineRecs: RDD[(String,Array[ItemScore])] = sc.parallelize({ users.map( userid => {
+      val query: Query = Query(user = userid, num = 20, unseenOnly = false, recentOnly = true, serendip = false, recentDate=None, blackList=None)
+      (userid,predict(model,query).itemScores)
+    })})
+
+    val userHistoriesBrdcst = sc.broadcast(data.userHistories)
+    val neighborMapBrdcst = sc.broadcast(neighborMap)
+
+    val triangleCounts: RDD[(String,Array[(ItemScore,Int)])] = userBaselineRecs.map { case(userid:String,baselineRecs:Array[ItemScore]) => {
+      val userHistory: Array[Long] = userHistoriesBrdcst.value.getOrElse(userid,Array.empty[Long])
+      val triCounts: Array[(ItemScore,Int)] = {
+        baselineRecs.map(baselineRec => {
+          val baselineRecId: Long = baselineRec.item.toLong
+          val subgraphNodes:Array[Long] = userHistory :+ baselineRecId
+          val subgraphNeighborMap: Map[VertexId,Array[VertexId]]= neighborMapBrdcst.value.filterKeys(subgraphNodes contains _.toLong)
+          val recNeighbors: Array[VertexId] = subgraphNeighborMap.getOrElse(baselineRecId,Array.empty[VertexId]).filter(subgraphNodes contains _.toLong)
+          val possibleTriEdges: Array[(VertexId,VertexId)] = recNeighbors.flatMap(_a => recNeighbors.map(_b => _a -> _b))
+          val count: Int = possibleTriEdges.filter{case(srcId,dstId) => subgraphNeighborMap.getOrElse(srcId,Array.empty[VertexId]) contains dstId }.length
+          (baselineRec,count/2)
+        })
+      }
+      (userid,triCounts)
+    }}
+
+    val preparedRecs: Map[String,Array[ItemScore]] = {
+      triangleCounts.map{ case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) =>
+        (userid,potentialWithTriangle.sortWith(_._2 < _._2).take(4))
+      }
+      .map{case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) => (userid,potentialWithTriangle.map(x=>x._1))}
+      .collect.toMap
+    }
+
+    logger.info(s"finished creating prpared recs")
+
     new ALSModel(
       rank = m.rank,
       productFeatures = m.productFeatures,
       userFeatures = m.userFeatures,
+      productModels = productModels,
+      preparedRecs = preparedRecs,
       itemStringIntMap = itemStringIntMap,
       userStringIntMap = userStringIntMap,
-      items = items,
-      userHistories = userHistoriesMap,
-      graph = data.graph
+      items = items.collectAsMap.toMap
     )
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
-    val userHistory:Array[Int] = model.userHistories(query.user)
-    //logger.info(s"user history for user ${query.user}: ${userHistory.mkString(", ")}.")
-    //logger.info(s"full graph edge count ${model.graph.edges.count}")
-    
-    //val subgraph = model.graph.subgraph
+    val productModels = model.productModels
+    val itemIntStringMap = model.itemStringIntMap.inverse
     val convertedBlackList: Set[Int] = genBlackList(query = query)
       .flatMap(x=>model.itemStringIntMap.get(x))
-  // Convert String ID to Int index for Mllib
-    model.userStringIntMap.get(query.user).map { userInt =>
-      // create inverse view of itemStringIntMap
-      val itemIntStringMap = model.itemStringIntMap.inverse
-      // recommendProducts() returns Array[MLlibRating], which uses item Int
-      // index. Convert it to String ID for returning PredictedResult
-      val itemScores:Array[ItemScore] = model
-        .recommendProductsWithFilter(userInt, 10,convertedBlackList)
-          .map { r  =>
-            val it = model.items(r.product)
-            new ItemScore(
-            title = it.title,
-            category = it.category,
-            item = itemIntStringMap(r.product),
-            score = r.rating
-          )}
-
-      logger.info(s"Made prediction for user ${query.user}: ${itemScores mkString}.")
-      logger.info(s"userHistory size: (${query.user}):${userHistory.size}")
-      logger.info(s"userHistory: (${query.user}): (${userHistory.mkString("), (")})")
-
-      val predictedTriangles: Array[(ItemScore,Int)] = itemScores.map{score => {
-        val predictedItem = score.item.toInt
-        val graphItems: Array[Int] = userHistory :+ predictedItem  
-        val subgraph = model.graph.subgraph(vpred = (id,attr) => graphItems contains id.toInt)
-	val triCounts = subgraph.triangleCount().vertices
-	logger.info(s"subgraph edges (${predictedItem.toString}):${subgraph.edges.count}")
-        subgraph.edges.foreach( edge => logger.info(s"${edge.toString}"))
-
-	logger.info(s"subgraph vertices (${predictedItem.toString}):${subgraph.vertices.count}")
-        subgraph.vertices.foreach( vert => logger.info(s"${vert.toString}"))
-
-	logger.info(s"triCount vertices ${triCounts.count}")
-        val count = triCounts.filter{case(item,count)=> {item.toInt == predictedItem}}.map{case(item,count)=>count}.first
-        logger.info(s"(${predictedItem},${count})")
-        (score,count)
-      }}.toArray
-
-      logger.info(s"predictedTriangles:")
-      
-
-      val boostedScores:Array[(ItemScore,Int)] = predictedTriangles.sortWith(_._2 < _._2)
-      boostedScores.foreach( tri => logger.info(s"${tri.toString}"))
-
-      //val edgeStrings:RDD[String] = subgraph.edges.map(edge=>edge.srcId.toString+","+edge.dstId.toString+","+edge.attr+",Undirected")
-      //edgeStrings.saveAsTextFile("edges_subgraph")
-
-      new PredictedResult(boostedScores.take(query.num).map{case(item,triangles)=> {item}})
-
-    }.getOrElse{
-      logger.info(s"No prediction for unknown user ${query.user}.")
-      new PredictedResult(Array.empty)
+    val convertedWhiteList: Set[Int] = genWhiteList(query = query,productModels=productModels,itemIntStringMap)
+      .flatMap(x=>model.itemStringIntMap.get(x))
+    // Convert String ID to Int index for Mllib
+    logger.info(s"in predict for ${query.user}, serendip is ${query.serendip.toString}")
+    if(query.serendip == false){
+      logger.info(s"creating baseline predict for ${query.user}") 
+      model.userStringIntMap.get(query.user).map { userInt =>
+        // create inverse view of itemStringIntMap
+        // recommendProducts() returns Array[MLlibRating], which uses item Int
+        // index. Convert it to String ID for returning PredictedResult
+        val itemScores = model
+          .recommendProductsWithFilter(userInt, query, convertedBlackList, convertedWhiteList)
+            .map { r  =>
+              val it = model.items(r.product)
+              new ItemScore(
+              title = it.title,
+              category = it.category,
+              date_created = it.date_created,
+              item = itemIntStringMap(r.product),
+              score = r.rating
+            )}
+        logger.info(s"Made prediction for user ${query.user}: ${itemScores mkString}.")
+        new PredictedResult(itemScores)
+      }.getOrElse{
+        logger.info(s"No prediction for unknown user ${query.user}.")
+        new PredictedResult(Array.empty)
+      }
+    }else{
+      logger.info(s"creating serendip predict for ${query.user}") 
+      new PredictedResult(model.preparedRecs(query.user))
     }
   }
+
+  def genWhiteList(query: Query,productModels:Map[Int,ProductModel],itemIntStringMap:BiMap[Int, String]): Set[String] = {
+    val recentDate = query.recentDate.getOrElse("2016-01-01")
+    // if recentOnly is True, get all recent items
+    if (query.recentOnly) {
+	productModels.filter{ case(id,pm)=>pm.item.date_created > recentDate}
+        .keySet
+	.flatMap(x=>itemIntStringMap.get(x))
+	.toSet
+    } else {
+      Set[String]()
+    }
+  }
+
   def genBlackList(query: Query): Set[String] = {
     // if unseenOnly is True, get all seen items
     val seenItems: Set[String] = if (query.unseenOnly) {
