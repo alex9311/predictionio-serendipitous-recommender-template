@@ -13,6 +13,8 @@ import org.apache.spark.mllib.recommendation.ALS
 import org.apache.spark.mllib.recommendation.{Rating => MLlibRating}
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.lib._
+import java.util.Calendar
+import java.text.SimpleDateFormat
 
 import org.apache.spark.mllib.recommendation.ALSModel
 
@@ -44,16 +46,11 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
 
   def train(sc: SparkContext, data: PreparedData): ALSModel = {
     require(!data.viewEvents.take(1).isEmpty,
-      s"viewEvents in PreparedData cannot be empty." +
-      " Please check if DataSource generates TrainingData" +
-      " and Preprator generates PreparedData correctly.")
+      s"viewEvents in PreparedData cannot be empty." + " Please check if DataSource generates TrainingData" + " and Preprator generates PreparedData correctly.")
     require(!data.items.take(1).isEmpty,
-      s"items in PreparedData cannot be empty." +
-      " Please check if DataSource generates TrainingData" +
-      " and Preprator generates PreparedData correctly.")
-    // create User and item's String ID to integer index BiMap
-    val userStringIntMap = BiMap.stringInt(data.viewEvents.map(_.user))
-    val itemStringIntMap = BiMap.stringInt(data.items.keys)
+      s"items in PreparedData cannot be empty." + " Please check if DataSource generates TrainingData" + " and Preprator generates PreparedData correctly.")
+    val userStringIntMap: BiMap[String,Int] = BiMap.stringInt(data.viewEvents.map(_.user))
+    val itemStringIntMap: BiMap[String,Int] = BiMap.stringInt(data.items.keys)
 
     val mllibRatings = data.viewEvents
       .map { r =>
@@ -62,22 +59,14 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
         val iindex = itemStringIntMap.getOrElse(r.item, -1)
 
         if (uindex == -1)
-          logger.info(s"Couldn't convert nonexistent user ID ${r.user}"
-            + " to Int index.")
-
+          logger.info(s"Couldn't convert nonexistent user ID ${r.user}" + " to Int index.")
         if (iindex == -1)
-          logger.info(s"Couldn't convert nonexistent item ID ${r.item}"
-            + " to Int index.")
+          logger.info(s"Couldn't convert nonexistent item ID ${r.item}" + " to Int index.")
 
         ((uindex, iindex), 1)
-      }.filter { case ((u, i), v) =>
-        // keep events with valid user and item index
-        (u != -1) && (i != -1)
-      }.reduceByKey(_ + _) // aggregate all view events of same user-item pair
-      .map { case ((u, i), v) =>
-        // MLlibRating requires integer index for user and item
-        MLlibRating(u, i, v)
-      }
+      }.filter { case ((u, i), v) => (u != -1) && (i != -1)}
+      .reduceByKey(_ + _) // aggregate all view events of same user-item pair
+      .map { case ((u, i), v) => MLlibRating(u, i, v)}
       .cache()
 
     // MLLib ALS cannot handle empty training data.
@@ -97,14 +86,10 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       alpha = 1.0,
       seed = seed)
 
-    val items = data.items.map { case (id, item) =>
-      (itemStringIntMap(id), item)
-    }
+    val itemsAsInt: RDD[(Int,Item)] = data.items.map { case (id, item) => (itemStringIntMap(id), item) }
 
-    val productFeatures: Map[Int, (Item, Option[Array[Double]])] =
-      items.leftOuterJoin(m.productFeatures).collectAsMap.toMap
-
-    val productModels: Map[Int, ProductModel] = productFeatures
+    val productModels: Map[Int, ProductModel] =
+      itemsAsInt.leftOuterJoin(m.productFeatures).collectAsMap.toMap
       .map { case (index, (item, features)) =>
         val pm = ProductModel(
           item = item,
@@ -113,34 +98,35 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
         (index, pm)
       }
 
-    val stubPreparedRecs: scala.collection.immutable.Map[String,Array[ItemScore]] = 
-      data.viewEvents.map(viewEvent =>(viewEvent.user,viewEvent.item.toInt))
-        .groupByKey()
-        .map{case(userid:String,items:Iterable[Int]) => { 
-          (userid,Array(ItemScore("item",1.0,"title","date","category")))
-        }}
-      .collect()
-      .toMap
-    
-    logger.info(s"creating stub model")
-
-    val model = new ALSModel(
+    val precalcModel = new ALSModel(
       rank = m.rank,
       productFeatures = m.productFeatures,
       userFeatures = m.userFeatures,
       productModels = productModels,
-      preparedRecs = stubPreparedRecs,
       itemStringIntMap = itemStringIntMap,
       userStringIntMap = userStringIntMap,
-      items = items.collectAsMap.toMap
+      itemsAsIntMap = itemsAsInt.collectAsMap.toMap,
+      twoWeeksAgo = getTwoWeeksAgo(),
+      preparedRecs = None
     )
-    
-    logger.info(s"finished creating stub model")
-    logger.info(s"creating prepared recs")
 
+    val preparedRecs: Map[String,Array[ItemScore]] = precalcRecs(sc,precalcModel,data)
+
+    new ALSModel(
+      rank = m.rank,
+      productFeatures = m.productFeatures,
+      userFeatures = m.userFeatures,
+      productModels = productModels,
+      itemStringIntMap = itemStringIntMap,
+      userStringIntMap = userStringIntMap,
+      itemsAsIntMap = itemsAsInt.collectAsMap.toMap,
+      twoWeeksAgo = getTwoWeeksAgo(),
+      preparedRecs = Some(preparedRecs)
+    )
+  }
+  def precalcRecs(sc: SparkContext, model: ALSModel, data: PreparedData): Map[String,Array[ItemScore]] = {
     val users: Array[String] = data.viewEvents.map(viewEvent => (viewEvent.user)).collect.distinct
 
-    logger.info(s"calculating neighbor map")
     val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.edges
       .flatMap{ edge => List((edge.srcId,edge.dstId),(edge.dstId,edge.srcId)) }
       .groupByKey
@@ -148,9 +134,8 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       .collect.toMap
     }
 
-    logger.info(s"calculating potentialRecs")
     val userBaselineRecs: RDD[(String,Array[ItemScore])] = sc.parallelize({ users.map( userid => {
-      val query: Query = Query(user = userid, num = 20, unseenOnly = false, recentOnly = true, serendip = false, recentDate=None, blackList=None)
+      val query: Query = Query(user = userid, num = 30, recommender = "baseline", recentDate=None, blackList=None)
       (userid,predict(model,query).itemScores)
     })})
 
@@ -180,40 +165,32 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       .map{case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) => (userid,potentialWithTriangle.map(x=>x._1))}
       .collect.toMap
     }
-
-    logger.info(s"finished creating prpared recs")
-
-    new ALSModel(
-      rank = m.rank,
-      productFeatures = m.productFeatures,
-      userFeatures = m.userFeatures,
-      productModels = productModels,
-      preparedRecs = preparedRecs,
-      itemStringIntMap = itemStringIntMap,
-      userStringIntMap = userStringIntMap,
-      items = items.collectAsMap.toMap
-    )
+    preparedRecs
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
-    val productModels = model.productModels
-    val itemIntStringMap = model.itemStringIntMap.inverse
-    val convertedBlackList: Set[Int] = genBlackList(query = query)
-      .flatMap(x=>model.itemStringIntMap.get(x))
-    val convertedWhiteList: Set[Int] = genWhiteList(query = query,productModels=productModels,itemIntStringMap)
-      .flatMap(x=>model.itemStringIntMap.get(x))
-    // Convert String ID to Int index for Mllib
-    logger.info(s"in predict for ${query.user}, serendip is ${query.serendip.toString}")
-    if(query.serendip == false){
-      logger.info(s"creating baseline predict for ${query.user}") 
+    if(query.recommender == "serendip"){
+      if(model.preparedRecs.isEmpty){
+        logger.info(s"No prepared recs, running cheap serendipity instead")
+        predict(model,Query(user = query.user, num = query.num, recommender = "cheap_serendip", recentDate=query.recentDate, blackList=query.blackList))
+      }else{
+        val itemScores: Array[ItemScore] = model.preparedRecs.get.getOrElse(query.user,{
+           logger.info(s"No prediction for unknown user ${query.user}.")
+           Array.empty
+        })
+        logger.info(s"Made (${query.recommender}) prediction for ${query.user}: ${itemScores mkString}.")
+        new PredictedResult(itemScores)
+      }
+
+    }else{
+      val itemIntStringMap = model.itemStringIntMap.inverse
+      val convertedBlackList: Set[Int] = query.blackList.getOrElse(Set[String]()).flatMap(x=>model.itemStringIntMap.get(x))
+      val recentItemList: Set[Int] = genRecentItemList(query, model, itemIntStringMap)
       model.userStringIntMap.get(query.user).map { userInt =>
-        // create inverse view of itemStringIntMap
-        // recommendProducts() returns Array[MLlibRating], which uses item Int
-        // index. Convert it to String ID for returning PredictedResult
         val itemScores = model
-          .recommendProductsWithFilter(userInt, query, convertedBlackList, convertedWhiteList)
+          .recommendProductsWithFilter(userInt, query, convertedBlackList, recentItemList)
             .map { r  =>
-              val it = model.items(r.product)
+              val it = model.itemsAsIntMap(r.product)
               new ItemScore(
               title = it.title,
               category = it.category,
@@ -221,69 +198,26 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
               item = itemIntStringMap(r.product),
               score = r.rating
             )}
-        logger.info(s"Made prediction for user ${query.user}: ${itemScores mkString}.")
+        if(!model.preparedRecs.isEmpty) {logger.info(s"Made (${query.recommender}) prediction for ${query.user}: ${itemScores mkString}.")}
         new PredictedResult(itemScores)
       }.getOrElse{
         logger.info(s"No prediction for unknown user ${query.user}.")
         new PredictedResult(Array.empty)
       }
-    }else{
-      logger.info(s"creating serendip predict for ${query.user}") 
-      new PredictedResult(model.preparedRecs(query.user))
     }
   }
 
-  def genWhiteList(query: Query,productModels:Map[Int,ProductModel],itemIntStringMap:BiMap[Int, String]): Set[String] = {
-    val recentDate = query.recentDate.getOrElse("2016-01-01")
-    // if recentOnly is True, get all recent items
-    if (query.recentOnly) {
-	productModels.filter{ case(id,pm)=>pm.item.date_created > recentDate}
-        .keySet
-	.flatMap(x=>itemIntStringMap.get(x))
-	.toSet
-    } else {
-      Set[String]()
-    }
+  def genRecentItemList(query: Query,model: ALSModel, itemIntStringMap:BiMap[Int, String]): Set[Int] = {
+    val recentDate: String = query.recentDate.getOrElse(model.twoWeeksAgo)
+    val productModels: Map[Int,ProductModel] = model.productModels
+    productModels.filter{ case(id,pm)=>pm.item.date_created > recentDate}
+      .keySet
   }
 
-  def genBlackList(query: Query): Set[String] = {
-    // if unseenOnly is True, get all seen items
-    val seenItems: Set[String] = if (query.unseenOnly) {
-
-      // get all user item events which are considered as "seen" events
-      val seenEvents: Iterator[Event] = try {
-        LEventStore.findByEntity(
-          appName = ap.appName,
-          entityType = "user",
-          entityId = query.user,
-          eventNames = Some(List("view")),
-          targetEntityType = Some(Some("item")),
-          // set time limit to avoid super long DB access
-          timeout = Duration(2000, "millis")
-        )
-      } catch {
-        case e: scala.concurrent.TimeoutException =>
-          logger.error(s"Timeout when read seen events." +
-            s" Empty list is used. ${e}")
-          Iterator[Event]()
-        case e: Exception =>
-          logger.error(s"Error when read seen events: ${e}")
-          throw e
-      }
-
-      seenEvents.map { event =>
-        try {
-          event.targetEntityId.get
-        } catch {
-          case e => {
-            logger.error(s"Can't get targetEntityId of event ${event}.")
-            throw e
-          }
-        }
-      }.toSet
-    } else {
-      Set[String]()
-    }
-    query.blackList.getOrElse(Set[String]()) ++ seenItems
+  def getTwoWeeksAgo(): String = {
+    val cal = Calendar.getInstance()
+    cal.add(Calendar.DATE,-14)
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    dateFormat.format(cal.getTime())
   }
 }

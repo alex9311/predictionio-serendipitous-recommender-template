@@ -7,18 +7,18 @@ import org.apache.spark.graphx._
 import org.apache.spark.graphx.lib._
 import scala.reflect.ClassTag
 import scala.collection.mutable
-import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel}
+import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel, LDAModel}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 
 
 object LdaSimHelpers {
   def gephiPrint(edges:RDD[(Int,Int,Double)],items:RDD[(String,Item)]) = {
-    println("going to output vertices")
+    val outDir: String = "gephi/edges"
+    println("saving graph to "+outDir+" in gephi import-ready format")
     val gephiVertices:RDD[String] = items.map{case(itemid,item)=> itemid+","+item.category+"\n"}
-    gephiVertices.saveAsTextFile("gephi/vertices")
-    println("going to output edges")
+    gephiVertices.saveAsTextFile(outDir)
     val gephiEdges:RDD[String] = edges.map{case(item1,item2,weight)=> item1.toString+","+item2.toString+","+weight.toString+",Undirected\n"}
-    gephiEdges.saveAsTextFile("gephi/edges")
+    gephiEdges.saveAsTextFile(outDir)
   }
 
   def calculateEdges(nodes:RDD[(Int,Array[Double])],sc:SparkContext):RDD[(Int,Int,Double)] = {
@@ -54,13 +54,23 @@ object LdaSimHelpers {
     math.sqrt(x map(i => i*i) sum)
   }
 
-  def findTriangles(id:Int,subgraph:Graph[String,Double]): Int = {
-        println(s"++++++++++++++++++++++++++++++++graph edge count from findTriangles for ${id.toString}: ${subgraph.edges.count}")
-        println(s"++++++++++++++++++++++++++++++++graph vertice count from findTriangles for ${id.toString}: ${subgraph.vertices.count}")
-        val triCounts = subgraph.triangleCount().vertices
-        val count:Int = triCounts.filter{case(item,count)=> {item.toInt == id}}.map{case(item,count)=>count}.first
-        println(s"++++++++++++++++++++++++++++++++triangle count from findTriangles for ${id.toString}: ${count.toString}")
-        count
+  def evaluateLda(trainingdocs:RDD[(Long,Vector)]) = {
+    for(numTopics<-Seq(60,65,70,75,80);iterations<-Seq(60)) {
+      val ldaModel = new LDA().setK(numTopics).setMaxIterations(iterations).run(trainingdocs)
+      val avgLogLikelihood = ldaModel.asInstanceOf[DistributedLDAModel].logLikelihood / trainingdocs.count()
+      println("============(topics: "+numTopics+", iterations: "+iterations+") avgLogLikelihood: "+avgLogLikelihood)
+    }
+  }
+
+  def printLdaTopics(ldaModel: LDAModel, vocabArray:Array[String]) = {
+    val topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 10) //this one too
+    topicIndices.foreach { case (terms, termWeights) =>
+        println("TOPIC:")
+        terms.zip(termWeights).foreach { case (term, weight) =>
+             println(s"${vocabArray(term.toInt)}\t$weight")
+        }
+        println()
+    }
   }
 
 }

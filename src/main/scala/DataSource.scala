@@ -13,7 +13,7 @@ import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.graphx._
 import scala.collection.mutable
-import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel}
+import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel, LocalLDAModel, LDAModel}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import java.io._
 
@@ -28,14 +28,42 @@ class DataSource(val dsp: DataSourceParams)
 
   @transient lazy val logger = Logger[this.type]
 
+  override
+  def readTraining(sc: SparkContext): TrainingData = {
+    val itemsRDD: RDD[(String, Item)] = getItems(sc)
+    val viewEventsRDD: RDD[ViewEvent] = getViewEvents(sc)
+    val corpusInfo: CorpusInfo = getCorpusInfo(viewEventsRDD, itemsRDD)
+    logger.info(s"corpusInfo: ${corpusInfo.toString}")
+    val userHistories: Map[String,Array[Long]] = {
+      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toLong))
+      .groupByKey()
+      .map{case(userid:String,items:Iterable[Long]) => (userid,items.toArray.distinct)}
+      .filter{ case(userid,items) => corpusInfo.vocab.contains(userid)}
+      .collect().toMap
+    }
+
+    val ldaParams: LDA = new LDA().setK(80).setMaxIterations(60)
+    val distributedLDAModel: DistributedLDAModel = ldaParams.run(corpusInfo.docTermVectors).asInstanceOf[DistributedLDAModel]
+    val localLdaModel: LocalLDAModel = distributedLDAModel.toLocal
+    val topicDistributions:Map[Long,Vector] = localLdaModel.topicDistributions(corpusInfo.docTermVectors).collect.toMap
+
+    val graphEdges: RDD[Edge[Double]] = calculateGraphEdges(sc, corpusInfo.docItemInfo, topicDistributions)
+    val graph : Graph[String, Double] = Graph.fromEdges(graphEdges,"defaultProperty")
+ 
+    new TrainingData(
+      items = itemsRDD,
+      viewEvents = viewEventsRDD,
+      userHistories = userHistories,
+      graph = graph
+    )
+  }
+
   def getViewEvents(sc:SparkContext): RDD[ViewEvent] = {
     val viewEventsRDD: RDD[ViewEvent] = PEventStore.find(
       appName = dsp.appName,
       entityType = Some("user"),
       eventNames = Some(List("view")),
-      // targetEntityType is optional field of an event.
       targetEntityType = Some(Some("item")))(sc)
-      // eventsDb.find() returns RDD[Event]
       .map { event =>
         val viewEvent = try {
           event.event match {
@@ -54,6 +82,7 @@ class DataSource(val dsp: DataSourceParams)
         }
         viewEvent
       }.cache()
+      logger.info("viewEventsRDD size:"+viewEventsRDD.count)
       viewEventsRDD
   }
 
@@ -66,8 +95,7 @@ class DataSource(val dsp: DataSourceParams)
         Item(
           category= properties.get[String]("category"),
           title= properties.get[String]("title"),
-          date_created= properties.get[String]("date_created"),
-          categories = properties.getOpt[List[String]]("categories")) 
+          date_created= properties.get[String]("date_created"))
       } catch {
         case e: Exception => {
           logger.error(s"Failed to get properties ${properties} of" +
@@ -77,123 +105,67 @@ class DataSource(val dsp: DataSourceParams)
       }
       (entityId, item)
     }.cache()
+    logger.info("==========================================itemsRDD size:"+itemsRDD.count)
     itemsRDD
   }
 
-  override
-  def readTraining(sc: SparkContext): TrainingData = {
+  def calculateGraphEdges(sc: SparkContext, docItemInfo: RDD[(String,Item)], topicDistributions: Map[Long,Vector]): RDD[Edge[Double]] = {
+    val itemTopicDistributions: RDD[(Int,Array[Double])] = 
+      docItemInfo.map{ case(itemid: String,item: Item) => 
+        val topicDistribution:Array[Double] = topicDistributions(itemid.toLong).toArray
+        (itemid.toInt,topicDistribution)
+      } 
 
-    // get items and view events into RDDs
-    val itemsRDD: RDD[(String, Item)] = getItems(sc)
-    println("==========================================itemsRDD size:"+itemsRDD.count)
-    val viewEventsRDD: RDD[ViewEvent] = getViewEvents(sc)
-    println("==========================================viewEventsRDD size:"+viewEventsRDD.count)
+    val edges: RDD[(Int,Int,Double)] = LdaSimHelpers.calculateEdges(itemTopicDistributions,sc)
+    //LdaSimHelpers.gephiPrint(edges,docItemInfo)
 
+    edges.map { case(item1:Int,item2:Int,weight:Double) => Edge(item1.toLong,item2.toLong,weight) }
+  }
 
-    //corpus used as source for training docs and input docs
+  def getCorpusInfo(viewEventsRDD: RDD[ViewEvent], itemsRDD: RDD[(String,Item)]): CorpusInfo = {
     val corpus: RDD[(Long,Array[String])] = {
        viewEventsRDD.map(event => (event.item,event.user))
-        .groupByKey() // you will get (itemid , Iterable[userId] )
-        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 2 }//remove items with less that 3 distinct viewers
+        .groupByKey()
+        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 2 }//remove items with less that 2 distinct viewers
         .map{ case(itemid,viewers) => (itemid.toLong, viewers.mkString(" ").split("\\s"))}
     }
 
-    println("==========================================corpus size: "+corpus.count)
-
-    //get corpus info needed for LDA stuff
     val termCounts: Array[(String, Long)] =
         corpus.flatMap(_._2.map(_ -> 1L)).reduceByKey(_ + _).filter(x=> x._2>1).collect().sortBy(-_._2)
-    println("==========================================termcounts size: "+termCounts.size)
     val vocabArray: Array[String] =
         termCounts.takeRight(termCounts.size).map(_._1)
     val vocab: Map[String, Int] = vocabArray.zipWithIndex.toMap
 
-    val userHistories: Map[String,Array[Long]] = {
-      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toLong))
-      .groupByKey()
-      .map{case(userid:String,items:Iterable[Long]) => (userid,items.toArray.distinct)}
-      .filter{ case(userid,items) => vocab.contains(userid)}
-      .collect().toMap
-    }
-
-    //get graphdocs with their user count vectors
-    val graphdocs: RDD[(Long, Vector)] =
-        corpus
-          .map { case (id:Long, tokens:Array[String]) =>
-            (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
-        }
-    println("==========================================graphdocs size: "+graphdocs.count)
+    val docTermVectors: RDD[(Long, Vector)] =
+      corpus.map { case (id:Long, tokens:Array[String]) =>
+        (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
+      }
 	
     //Item info for items to be included in graph
-    val graphItems:RDD[(String,Item)] = graphdocs.map{
+    val docItemInfo:RDD[(String,Item)] = docTermVectors.map{
       case(itemid:Long,viewers:Vector)=> (itemid.toString,1)
     }.join(itemsRDD).map{ case(itemid:String,(t:Int,item:Item))=> (itemid,item) }
-    println("==========================================graphItems size:"+graphItems.count)
-
-    //get user counts for all docs in corpus for training set
-    val trainingdocs: RDD[(Long, Vector)] =
-        corpus.map { case (id:Long, tokens:Array[String]) =>
-            (id, Vectors.sparse(vocab.size, LdaSimHelpers.get_termcount(tokens,vocab).toSeq))
-        }
-
-    // Set LDA parameters
-    //val ldaModel = new LDA().setK(80).setMaxIterations(60).run(trainingdocs)//this stuff
-/*
-    for(numTopics<-Seq(60,65,70,75,80);iterations<-Seq(60)) {
-      val ldaModel = new LDA().setK(numTopics).setMaxIterations(iterations).run(trainingdocs)
-      val avgLogLikelihood = ldaModel.asInstanceOf[DistributedLDAModel].logLikelihood / trainingdocs.count()
-      println("============(topics: "+numTopics+", iterations: "+iterations+") avgLogLikelihood: "+avgLogLikelihood)
-    }*/
-
-    // Print topics, showing top-weighted 10 terms for each topic.
-    //val topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 10) //this one too
-/*
-    topicIndices.foreach { case (terms, termWeights) =>
-        println("TOPIC:")
-        terms.zip(termWeights).foreach { case (term, weight) =>
-             println(s"${vocabArray(term.toInt)}\t$weight")
-        }
-        println()
-    }*/
-
-
-    //ldaModel.save(sc, "myLDAModel") //and this one
-    val localLdaModel = DistributedLDAModel.load(sc, "myLDAModel").toLocal
-
-    val topicDistributions:collection.Map[Long,Vector] = localLdaModel.topicDistributions(graphdocs).collectAsMap()
-    //for((k,v) <- topicDistributions) printf("itemid: %s, topic vector (%s)\n",k,v.toArray.mkString(", "))
-    println("finished calculating topic distributions")
-    
-    //graphItems.map{case(itemid:String,item:Item)=> (itemid,topicDistributions(itemid.toLong))}.saveAsTextFile("output")
-
-    val edges: RDD[(Int,Int,Double)] = LdaSimHelpers.calculateEdges(graphItems.map{case(itemid:String,item:Item)=>(itemid.toInt,topicDistributions(itemid.toLong).toArray)},sc)
-    println("number of edges: "+edges.count)
-    println("finished calculating edges, going to print")
-
-    //LdaSimHelpers.gephiPrint(edges,graphItems)
-
-    val graphEdges: RDD[Edge[Double]] = edges.map {
-      case(item1:Int,item2:Int,weight:Double) => Edge(item1.toLong,item2.toLong,weight)
-    }
-  
-    val g : Graph[String, Double] = Graph.fromEdges(graphEdges,"defaultProperty")
-
-    new TrainingData(
-      items = itemsRDD,
-      viewEvents = viewEventsRDD,
-      userHistories = userHistories,
-      graph = g
-    )
+   
+    new CorpusInfo(vocab = vocab, docTermVectors = docTermVectors, docItemInfo = docItemInfo)
   }
 }
-
-case class User()
 
 case class Item(
     title: String,
     category: String,
-    date_created: String,
-    categories: Option[List[String]])
+    date_created: String)
+
+case class CorpusInfo( 
+  val vocab: Map[String, Int], 
+  val docTermVectors: RDD[(Long,Vector)], 
+  val docItemInfo: RDD[(String,Item)]
+) extends Serializable {
+  override def toString = {
+    s"vocab length: [${vocab.keySet.size}" + 
+    s"docTermVectors: [${docTermVectors.count()}] (${docTermVectors.take(2).toList}...)"
+    s"docItemInfo: [${docItemInfo.count()}] (${docItemInfo.take(2).toList}...)"
+  }
+}
 
 case class ViewEvent(user: String, item: String, t: Long)
 

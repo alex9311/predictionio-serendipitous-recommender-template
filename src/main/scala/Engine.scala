@@ -6,9 +6,7 @@ import io.prediction.controller.Engine
 case class Query(
   user: String,
   num: Int,
-  unseenOnly:Boolean,
-  recentOnly:Boolean,
-  serendip:Boolean,
+  recommender: String,
   blackList: Option[Set[String]],
   recentDate: Option[String]
 ) extends Serializable
