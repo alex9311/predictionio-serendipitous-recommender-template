@@ -108,8 +108,8 @@ object ALSModel
       itemsAsIntMap = sc.get
         .objectFile[Map[Int, Item]](s"/home/ubuntu/saved_models/${id}/itemsAsIntMap").first,
       twoWeeksAgo = sc.get.objectFile[String](s"/home/ubuntu/saved_models/${id}/twoWeeksAgo").first,
-      preparedRecs = Some(sc.get
-        .objectFile[Map[String, Array[ItemScore]]](s"/home/ubuntu/saved_models/${id}/preparedRecs").first)
+      preparedRecs = sc.get
+        .objectFile[Option[Map[String, Array[ItemScore]]]](s"/home/ubuntu/saved_models/${id}/preparedRecs").first
     ) 
   }
 }

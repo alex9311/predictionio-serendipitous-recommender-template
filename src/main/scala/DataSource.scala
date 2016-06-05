@@ -17,7 +17,6 @@ import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel, LocalLDAMode
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import java.io._
 
-
 import grizzled.slf4j.Logger
 
 case class DataSourceParams(appName: String, graphEdgelistPath: String) extends Params

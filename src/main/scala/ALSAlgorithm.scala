@@ -51,25 +51,8 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       s"items in PreparedData cannot be empty." + " Please check if DataSource generates TrainingData" + " and Preprator generates PreparedData correctly.")
     val userStringIntMap: BiMap[String,Int] = BiMap.stringInt(data.viewEvents.map(_.user))
     val itemStringIntMap: BiMap[String,Int] = BiMap.stringInt(data.items.keys)
+    val mllibRatings: RDD[MLlibRating] = getRatingFromData(data, userStringIntMap, itemStringIntMap)
 
-    val mllibRatings = data.viewEvents
-      .map { r =>
-        // Convert user and item String IDs to Int index for MLlib
-        val uindex = userStringIntMap.getOrElse(r.user, -1)
-        val iindex = itemStringIntMap.getOrElse(r.item, -1)
-
-        if (uindex == -1)
-          logger.info(s"Couldn't convert nonexistent user ID ${r.user}" + " to Int index.")
-        if (iindex == -1)
-          logger.info(s"Couldn't convert nonexistent item ID ${r.item}" + " to Int index.")
-
-        ((uindex, iindex), 1)
-      }.filter { case ((u, i), v) => (u != -1) && (i != -1)}
-      .reduceByKey(_ + _) // aggregate all view events of same user-item pair
-      .map { case ((u, i), v) => MLlibRating(u, i, v)}
-      .cache()
-
-    // MLLib ALS cannot handle empty training data.
     require(!mllibRatings.take(1).isEmpty,
       s"mllibRatings cannot be empty." +
       " Please check if your events contain valid user and item ID.")
@@ -124,49 +107,6 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       preparedRecs = Some(preparedRecs)
     )
   }
-  def precalcRecs(sc: SparkContext, model: ALSModel, data: PreparedData): Map[String,Array[ItemScore]] = {
-    val users: Array[String] = data.viewEvents.map(viewEvent => (viewEvent.user)).collect.distinct
-
-    val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.edges
-      .flatMap{ edge => List((edge.srcId,edge.dstId),(edge.dstId,edge.srcId)) }
-      .groupByKey
-      .map{case(edge,neighbors)=>(edge,neighbors.toArray)}
-      .collect.toMap
-    }
-
-    val userBaselineRecs: RDD[(String,Array[ItemScore])] = sc.parallelize({ users.map( userid => {
-      val query: Query = Query(user = userid, num = 30, recommender = "baseline", recentDate=None, blackList=None)
-      (userid,predict(model,query).itemScores)
-    })})
-
-    val userHistoriesBrdcst = sc.broadcast(data.userHistories)
-    val neighborMapBrdcst = sc.broadcast(neighborMap)
-
-    val triangleCounts: RDD[(String,Array[(ItemScore,Int)])] = userBaselineRecs.map { case(userid:String,baselineRecs:Array[ItemScore]) => {
-      val userHistory: Array[Long] = userHistoriesBrdcst.value.getOrElse(userid,Array.empty[Long])
-      val triCounts: Array[(ItemScore,Int)] = {
-        baselineRecs.map(baselineRec => {
-          val baselineRecId: Long = baselineRec.item.toLong
-          val subgraphNodes:Array[Long] = userHistory :+ baselineRecId
-          val subgraphNeighborMap: Map[VertexId,Array[VertexId]]= neighborMapBrdcst.value.filterKeys(subgraphNodes contains _.toLong)
-          val recNeighbors: Array[VertexId] = subgraphNeighborMap.getOrElse(baselineRecId,Array.empty[VertexId]).filter(subgraphNodes contains _.toLong)
-          val possibleTriEdges: Array[(VertexId,VertexId)] = recNeighbors.flatMap(_a => recNeighbors.map(_b => _a -> _b))
-          val count: Int = possibleTriEdges.filter{case(srcId,dstId) => subgraphNeighborMap.getOrElse(srcId,Array.empty[VertexId]) contains dstId }.length
-          (baselineRec,count/2)
-        })
-      }
-      (userid,triCounts)
-    }}
-
-    val preparedRecs: Map[String,Array[ItemScore]] = {
-      triangleCounts.map{ case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) =>
-        (userid,potentialWithTriangle.sortWith(_._2 < _._2).take(4))
-      }
-      .map{case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) => (userid,potentialWithTriangle.map(x=>x._1))}
-      .collect.toMap
-    }
-    preparedRecs
-  }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
     if(query.recommender == "serendip"){
@@ -175,14 +115,14 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
         predict(model,Query(user = query.user, num = query.num, recommender = "cheap_serendip", recentDate=query.recentDate, blackList=query.blackList))
       }else{
         val itemScores: Array[ItemScore] = model.preparedRecs.get.getOrElse(query.user,{
-           logger.info(s"No prediction for unknown user ${query.user}.")
-           Array.empty
+           logger.info(s"No serendipitous recommendation prepared for user ${query.user}, running cheap_serendip instead.")
+           predict(model,Query(user = query.user, num = query.num, recommender = "cheap_serendip", recentDate=query.recentDate, blackList=query.blackList)).itemScores
         })
-        logger.info(s"Made (${query.recommender}) prediction for ${query.user}: ${itemScores mkString}.")
+        if(!itemScores.isEmpty){logger.info(s"Made (${query.recommender}) prediction for ${query.user}: ${itemScores mkString}.")}
         new PredictedResult(itemScores)
       }
 
-    }else{
+    }else if(query.recommender == "cheap_serendip" || query.recommender == "baseline"){
       val itemIntStringMap = model.itemStringIntMap.inverse
       val convertedBlackList: Set[Int] = query.blackList.getOrElse(Set[String]()).flatMap(x=>model.itemStringIntMap.get(x))
       val recentItemList: Set[Int] = genRecentItemList(query, model, itemIntStringMap)
@@ -204,7 +144,78 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
         logger.info(s"No prediction for unknown user ${query.user}.")
         new PredictedResult(Array.empty)
       }
+    }else {
+      logger.info(s"unknown prediction type: '${query.recommender}'.")
+      new PredictedResult(Array.empty)
     }
+  }
+
+  def getRatingFromData(data:PreparedData, userStringIntMap:BiMap[String,Int], itemStringIntMap: BiMap[String,Int]): RDD[MLlibRating] = {
+    val mllibRatings = data.viewEvents
+      .map { viewEvent =>
+        // Convert user and item String IDs to Int index for MLlib
+        val uindex: Int = userStringIntMap.getOrElse(viewEvent.user, -1)
+        val iindex: Int = itemStringIntMap.getOrElse(viewEvent.item, -1)
+
+        if (uindex == -1)
+          logger.info(s"Couldn't convert nonexistent user ID ${viewEvent.user}" + " to Int index.")
+        if (iindex == -1)
+          logger.info(s"Couldn't convert nonexistent item ID ${viewEvent.item}" + " to Int index.")
+
+        ((uindex, iindex), 1)
+      }.filter { case ((user, item), viewCount) => (user != -1) && (item != -1)}
+      .reduceByKey(_ + _) // aggregate all view events of same user-item pair
+      .map { case ((user, item), totalViews) => MLlibRating(user, item, totalViews)}
+      .cache()
+    mllibRatings
+  }
+
+  def precalcRecs(sc: SparkContext, model: ALSModel, data: PreparedData): Map[String,Array[ItemScore]] = {
+    val users: Array[String] = data.viewEvents.map(viewEvent => (viewEvent.user)).collect.distinct
+
+    val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.edges
+      .flatMap{ edge => List((edge.srcId,edge.dstId),(edge.dstId,edge.srcId)) }
+      .groupByKey
+      .map{case(edge,neighbors)=>(edge,neighbors.toArray)}
+      .collect.toMap
+    }
+
+    logger.info(s"getting baseline recs...")
+    val userBaselineRecs: RDD[(String,Array[ItemScore])] = sc.parallelize({ users.map( userid => {
+      val query: Query = Query(user = userid, num = 30, recommender = "baseline", recentDate=None, blackList=None)
+      (userid,predict(model,query).itemScores)
+    })})
+
+    val userHistoriesBrdcst = sc.broadcast(data.userHistories)
+    val neighborMapBrdcst = sc.broadcast(neighborMap)
+
+    logger.info(s"getting triangle counts...")
+    val triangleCounts: RDD[(String,Array[(ItemScore,Int)])] = userBaselineRecs.map { case(userid:String,baselineRecs:Array[ItemScore]) => {
+      val userHistory: Array[Long] = userHistoriesBrdcst.value.getOrElse(userid,Array.empty[Long])
+      val triCounts: Array[(ItemScore,Int)] = {
+        baselineRecs.map(baselineRec => {
+          val baselineRecId: Long = baselineRec.item.toLong
+          val subgraphNodes:Array[Long] = userHistory :+ baselineRecId
+          val subgraphNeighborMap: Map[VertexId,Array[VertexId]]= neighborMapBrdcst.value.filterKeys(subgraphNodes contains _.toLong)
+          val recNeighbors: Array[VertexId] = subgraphNeighborMap.getOrElse(baselineRecId,Array.empty[VertexId]).filter(subgraphNodes contains _.toLong)
+          val possibleTriEdges: Array[(VertexId,VertexId)] = recNeighbors.flatMap(_a => recNeighbors.map(_b => _a -> _b))
+          val count: Int = possibleTriEdges.filter{case(srcId,dstId) => subgraphNeighborMap.getOrElse(srcId,Array.empty[VertexId]) contains dstId }.length
+          (baselineRec,count/2)
+        })
+      }
+      (userid,triCounts)
+    }}
+
+    logger.info(s"getting prepared recs...")
+    val preparedRecs: Map[String,Array[ItemScore]] = {
+      triangleCounts.map{ case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) =>
+        (userid,potentialWithTriangle.sortWith(_._2 < _._2).take(4))
+      }
+      .map{case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) => (userid,potentialWithTriangle.map(x=>x._1))}
+      .collect.toMap
+    }
+
+    preparedRecs
   }
 
   def genRecentItemList(query: Query,model: ALSModel, itemIntStringMap:BiMap[Int, String]): Set[Int] = {
