@@ -24,5 +24,5 @@ class PreparedData(
   val items: RDD[(String, Item)],
   val viewEvents: RDD[ViewEvent],
   val userHistories: Map[String,Array[Long]],
-  val graph: Graph[String,Double]
+  val graph: Option[Graph[String,Double]]
 ) extends Serializable

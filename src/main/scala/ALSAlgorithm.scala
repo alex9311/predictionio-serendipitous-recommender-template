@@ -49,6 +49,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       s"viewEvents in PreparedData cannot be empty." + " Please check if DataSource generates TrainingData" + " and Preprator generates PreparedData correctly.")
     require(!data.items.take(1).isEmpty,
       s"items in PreparedData cannot be empty." + " Please check if DataSource generates TrainingData" + " and Preprator generates PreparedData correctly.")
+    logger.info("starting training on data")
     val userStringIntMap: BiMap[String,Int] = BiMap.stringInt(data.viewEvents.map(_.user))
     val itemStringIntMap: BiMap[String,Int] = BiMap.stringInt(data.items.keys)
     val mllibRatings: RDD[MLlibRating] = getRatingFromData(data, userStringIntMap, itemStringIntMap)
@@ -93,19 +94,25 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
       preparedRecs = None
     )
 
-    val preparedRecs: Map[String,Array[ItemScore]] = precalcRecs(sc,precalcModel,data)
+    if(!data.graph.isEmpty){
+      logger.info("found graph, must not be als evaluation training")
+      val preparedRecs: Map[String,Array[ItemScore]] = precalcRecs(sc,precalcModel,data)
 
-    new ALSModel(
-      rank = m.rank,
-      productFeatures = m.productFeatures,
-      userFeatures = m.userFeatures,
-      productModels = productModels,
-      itemStringIntMap = itemStringIntMap,
-      userStringIntMap = userStringIntMap,
-      itemsAsIntMap = itemsAsInt.collectAsMap.toMap,
-      twoWeeksAgo = getTwoWeeksAgo(),
-      preparedRecs = Some(preparedRecs)
-    )
+      new ALSModel(
+        rank = m.rank,
+        productFeatures = m.productFeatures,
+        userFeatures = m.userFeatures,
+        productModels = productModels,
+        itemStringIntMap = itemStringIntMap,
+        userStringIntMap = userStringIntMap,
+        itemsAsIntMap = itemsAsInt.collectAsMap.toMap,
+        twoWeeksAgo = getTwoWeeksAgo(),
+        preparedRecs = Some(preparedRecs)
+      )
+    }else{
+      logger.info("did not find graph, must be als evaluation training")
+      precalcModel
+    }
   }
 
   def predict(model: ALSModel, query: Query): PredictedResult = {
@@ -173,7 +180,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
   def precalcRecs(sc: SparkContext, model: ALSModel, data: PreparedData): Map[String,Array[ItemScore]] = {
     val users: Array[String] = data.viewEvents.map(viewEvent => (viewEvent.user)).collect.distinct
 
-    val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.edges
+    val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.get.edges
       .flatMap{ edge => List((edge.srcId,edge.dstId),(edge.dstId,edge.srcId)) }
       .groupByKey
       .map{case(edge,neighbors)=>(edge,neighbors.toArray)}
@@ -230,5 +237,51 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
     cal.add(Calendar.DATE,-14)
     val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
     dateFormat.format(cal.getTime())
+  }
+  override def batchPredict(model: ALSModel, queries: RDD[(Long, Query)]): RDD[(Long, PredictedResult)] = {
+    val userIxQueries: RDD[(Int, (Long, Query))] = queries
+    .map { case (ix, query) => {
+      // If user not found, then the index is -1
+      val userIx = model.userStringIntMap.get(query.user).getOrElse(-1)
+      (userIx, (ix, query))
+    }}
+
+    // Cross product of all valid users from the queries and products in the model.
+    val usersProducts: RDD[(Int, Int)] = userIxQueries
+      .keys
+      .filter(_ != -1)
+      .cartesian(model.productFeatures.map(_._1))
+
+    // Call mllib ALS's predict function.
+    val ratings: RDD[MLlibRating] = model.predict(usersProducts)
+
+    // The following code construct predicted results from mllib's ratings.
+    // Not optimal implementation. Instead of groupBy, should use combineByKey with a PriorityQueue
+    val userRatings: RDD[(Int, Iterable[MLlibRating])] = ratings.groupBy(_.user)
+
+    userIxQueries.leftOuterJoin(userRatings)
+    .map {
+      // When there are ratings
+      case (userIx, ((ix, query), Some(ratings))) => {
+        val topItemScores: Array[ItemScore] = ratings
+        .toArray
+        .sortBy(_.rating)(Ordering.Double.reverse) // note: from large to small ordering
+        .take(query.num)
+        .map { rating => 
+	  val it = model.itemsAsIntMap(rating.product)
+          ItemScore(
+            title = it.title,
+            category = it.category,
+            date_created = it.date_created,
+            item = model.itemStringIntMap.inverse(rating.product),
+            score = rating.rating)}
+        (ix, PredictedResult(itemScores = topItemScores))
+      }
+      // When user doesn't exist in training data
+      case (userIx, ((ix, query), None)) => {
+        require(userIx == -1)
+        (ix, PredictedResult(itemScores = Array.empty))
+      }
+    }
   }
 }

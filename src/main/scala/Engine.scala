@@ -35,3 +35,7 @@ object SerendipitousEngine extends IEngineFactory {
       classOf[Serving])
   }
 }
+
+case class ActualResult(
+  viewEvents: Array[ViewEvent]
+) extends Serializable

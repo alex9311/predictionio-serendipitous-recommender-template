@@ -19,11 +19,15 @@ import java.io._
 
 import grizzled.slf4j.Logger
 
-case class DataSourceParams(appName: String, graphEdgelistPath: String) extends Params
+
+case class DataSourceEvalParams(kFold: Int, queryNum: Int)
+
+case class DataSourceParams(appName: String, evalParams: Option[DataSourceEvalParams]) extends Params
+
 
 class DataSource(val dsp: DataSourceParams)
   extends PDataSource[TrainingData,
-      EmptyEvaluationInfo, Query, EmptyActualResult] {
+      EmptyEvaluationInfo, Query, ActualResult] {
 
   @transient lazy val logger = Logger[this.type]
 
@@ -33,13 +37,7 @@ class DataSource(val dsp: DataSourceParams)
     val viewEventsRDD: RDD[ViewEvent] = getViewEvents(sc)
     val corpusInfo: CorpusInfo = getCorpusInfo(viewEventsRDD, itemsRDD)
     logger.info(s"corpusInfo: ${corpusInfo.toString}")
-    val userHistories: Map[String,Array[Long]] = {
-      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toLong))
-      .groupByKey()
-      .map{case(userid:String,items:Iterable[Long]) => (userid,items.toArray.distinct)}
-      .filter{ case(userid,items) => corpusInfo.vocab.contains(userid)}
-      .collect().toMap
-    }
+    val userHistories: Map[String,Array[Long]] = getUserHistories(viewEventsRDD,corpusInfo)
 
     val ldaParams: LDA = new LDA().setK(80).setMaxIterations(60)
     val distributedLDAModel: DistributedLDAModel = ldaParams.run(corpusInfo.docTermVectors).asInstanceOf[DistributedLDAModel]
@@ -53,7 +51,7 @@ class DataSource(val dsp: DataSourceParams)
       items = itemsRDD,
       viewEvents = viewEventsRDD,
       userHistories = userHistories,
-      graph = graph
+      graph = Some(graph)
     )
   }
 
@@ -108,6 +106,17 @@ class DataSource(val dsp: DataSourceParams)
     itemsRDD
   }
 
+  def getUserHistories(viewEventsRDD: RDD[ViewEvent],corpusInfo: CorpusInfo): Map[String,Array[Long]] = {
+    val userHistories: Map[String,Array[Long]] = {
+      viewEventsRDD.map(viewEvent =>(viewEvent.user,viewEvent.item.toLong))
+      .groupByKey()
+      .map{case(userid:String,items:Iterable[Long]) => (userid,items.toArray.distinct)}
+      .filter{ case(userid,items) => corpusInfo.vocab.contains(userid)}
+      .collect().toMap
+    }
+    userHistories
+  }
+
   def calculateGraphEdges(sc: SparkContext, docItemInfo: RDD[(String,Item)], topicDistributions: Map[Long,Vector]): RDD[Edge[Double]] = {
     val itemTopicDistributions: RDD[(Int,Array[Double])] = 
       docItemInfo.map{ case(itemid: String,item: Item) => 
@@ -147,6 +156,46 @@ class DataSource(val dsp: DataSourceParams)
    
     new CorpusInfo(vocab = vocab, docTermVectors = docTermVectors, docItemInfo = docItemInfo)
   }
+
+  override
+  def readEval(sc: SparkContext)
+  : Seq[(TrainingData, EmptyEvaluationInfo, RDD[(Query, ActualResult)])] = {
+    require(!dsp.evalParams.isEmpty, "Must specify evalParams")
+    logger.info("reading eval training data")
+    val evalParams = dsp.evalParams.get
+    val kFold = evalParams.kFold
+
+    val itemsRDD = getItems(sc)
+    val eventsRDD = getViewEvents(sc)
+    val corpusInfo: CorpusInfo = getCorpusInfo(eventsRDD, itemsRDD)
+    val userHistories: Map[String,Array[Long]] = getUserHistories(eventsRDD,corpusInfo)
+
+    val userItemViews: RDD[(ViewEvent, Long)] = eventsRDD.map { r =>
+        ((r.user, r.item), 1)
+      }.reduceByKey((_,_)=>1) // aggregate all view events of same user-item pair
+      .map { case ((user, item), v) =>
+        ViewEvent(user, item, v)
+      }
+      .zipWithUniqueId
+    userItemViews.cache
+
+    (0 until kFold).map { idx => {
+      val trainingRatings = userItemViews.filter(_._2 % kFold != idx).map(_._1)
+      val testingRatings = userItemViews.filter(_._2 % kFold == idx).map(_._1)
+
+      //create RDD of userid, and itemViews of that user
+      val testingUsers: RDD[(String, Iterable[ViewEvent])] = testingRatings.groupBy(_.user)
+
+      logger.info("creating new training data set")
+
+      (new TrainingData(items = itemsRDD, viewEvents = eventsRDD, userHistories = userHistories, graph = None),
+        new EmptyEvaluationInfo(),
+        testingUsers.map {
+          case (user, itemViews) => (Query(user = user, num = evalParams.queryNum, recommender = "baseline", blackList = Some(Set[String]()), recentDate = Some("1970-01-01") ), ActualResult(itemViews.toArray))
+        }
+      )
+    }}
+  }
 }
 
 case class Item(
@@ -160,9 +209,9 @@ case class CorpusInfo(
   val docItemInfo: RDD[(String,Item)]
 ) extends Serializable {
   override def toString = {
-    s"vocab length: [${vocab.keySet.size}" + 
-    s"docTermVectors: [${docTermVectors.count()}] (${docTermVectors.take(2).toList}...)"
-    s"docItemInfo: [${docItemInfo.count()}] (${docItemInfo.take(2).toList}...)"
+    s"vocab length: [${vocab.keySet.size}\n" + 
+    s"docTermVectors: [${docTermVectors.count()}] (${docTermVectors.take(2).toList}...)\n"+
+    s"docItemInfo: [${docItemInfo.count()}] (${docItemInfo.take(2).toList}...)\n"
   }
 }
 
@@ -172,7 +221,7 @@ class TrainingData(
   val items: RDD[(String, Item)],
   val viewEvents: RDD[ViewEvent],
   val userHistories: Map[String,Array[Long]],
-  val graph: Graph[String,Double]
+  val graph: Option[Graph[String,Double]]
 ) extends Serializable {
   override def toString = {
     s"items: [${items.count()} (${items.take(2).toList}...)]" +

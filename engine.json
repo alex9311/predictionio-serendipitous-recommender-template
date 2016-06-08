@@ -4,7 +4,6 @@
   "engineFactory": "org.template.serendipitous.SerendipitousEngine"
   "datasource": {
     "params" : {
-      "graphEdgelistPath":"data/edge_list_small.txt",
       "appName": "INVALID_APP_NAME"
     }
   },
