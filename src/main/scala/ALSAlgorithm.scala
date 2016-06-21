@@ -179,7 +179,9 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
 
   def precalcRecs(sc: SparkContext, model: ALSModel, data: PreparedData): Map[String,Array[ItemScore]] = {
     val users: Array[String] = data.viewEvents.map(viewEvent => (viewEvent.user)).collect.distinct
+    logger.info(s"found ${users.length} users to precalc recs for")
 
+    logger.info(s"graph has ${data.graph.get.edges.count.toString} edges and ${data.graph.get.vertices.count.toString} vertices...")
     val neighborMap: Map[VertexId,Array[VertexId]] = { data.graph.get.edges
       .flatMap{ edge => List((edge.srcId,edge.dstId),(edge.dstId,edge.srcId)) }
       .groupByKey
@@ -199,6 +201,7 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
     logger.info(s"getting triangle counts...")
     val triangleCounts: RDD[(String,Array[(ItemScore,Int)])] = userBaselineRecs.map { case(userid:String,baselineRecs:Array[ItemScore]) => {
       val userHistory: Array[Long] = userHistoriesBrdcst.value.getOrElse(userid,Array.empty[Long])
+      //logger.info(s"for user: ${userid}\nbaseline recs: ${baselineRecs.toString}\nuserHistory: ${userHistory.mkString(", ")}")
       val triCounts: Array[(ItemScore,Int)] = {
         baselineRecs.map(baselineRec => {
           val baselineRecId: Long = baselineRec.item.toLong
@@ -210,13 +213,17 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
           (baselineRec,count/2)
         })
       }
+      //logger.info(s"tricounts for user ${userid}:")
+      //triCounts.foreach(x=>logger.info(s"item: ${x._1.toString}, tricount:${x._2.toString}"))
       (userid,triCounts)
     }}
+
 
     logger.info(s"getting prepared recs...")
     val preparedRecs: Map[String,Array[ItemScore]] = {
       triangleCounts.map{ case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) =>
-        (userid,potentialWithTriangle.sortWith(_._2 < _._2).take(4))
+        val preparedRec: Array[(ItemScore,Int)] = potentialWithTriangle.reverse.sortWith(_._2 < _._2).take(4)
+        (userid,preparedRec)
       }
       .map{case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) => (userid,potentialWithTriangle.map(x=>x._1))}
       .collect.toMap

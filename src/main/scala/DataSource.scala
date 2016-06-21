@@ -39,10 +39,11 @@ class DataSource(val dsp: DataSourceParams)
     logger.info(s"corpusInfo: ${corpusInfo.toString}")
     val userHistories: Map[String,Array[Long]] = getUserHistories(viewEventsRDD,corpusInfo)
 
+    //LdaSimHelpers.evaluateLda(corpusInfo.docTermVectors) 
+
     val ldaParams: LDA = new LDA().setK(80).setMaxIterations(60)
     val distributedLDAModel: DistributedLDAModel = ldaParams.run(corpusInfo.docTermVectors).asInstanceOf[DistributedLDAModel]
-    val localLdaModel: LocalLDAModel = distributedLDAModel.toLocal
-    val topicDistributions:Map[Long,Vector] = localLdaModel.topicDistributions(corpusInfo.docTermVectors).collect.toMap
+    val topicDistributions:Map[Long,Vector] = distributedLDAModel.topicDistributions.collect.toMap
 
     val graphEdges: RDD[Edge[Double]] = calculateGraphEdges(sc, corpusInfo.docItemInfo, topicDistributions)
     val graph : Graph[String, Double] = Graph.fromEdges(graphEdges,"defaultProperty")
@@ -125,7 +126,7 @@ class DataSource(val dsp: DataSourceParams)
       } 
 
     val edges: RDD[(Int,Int,Double)] = LdaSimHelpers.calculateEdges(itemTopicDistributions,sc)
-    //LdaSimHelpers.gephiPrint(edges,docItemInfo)
+    LdaSimHelpers.gephiPrint(edges,docItemInfo)
 
     edges.map { case(item1:Int,item2:Int,weight:Double) => Edge(item1.toLong,item2.toLong,weight) }
   }

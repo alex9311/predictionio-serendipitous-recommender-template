@@ -59,4 +59,3 @@ object EngineParamsList extends BaseEngineParamsList {
       algorithmParamsList = Seq(
         ("als", ALSAlgorithmParams("Serendip",rank, numIterations, 0.01, Some(3)))))
 }
-

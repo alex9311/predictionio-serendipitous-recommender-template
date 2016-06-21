@@ -17,6 +17,9 @@ import org.apache.spark.graphx._
 import org.apache.spark.graphx.lib._
 
 import org.jblas.DoubleMatrix
+import java.util.Calendar
+import java.text.SimpleDateFormat
+import java.io.File
 
 
 class ALSModel(
@@ -32,21 +35,23 @@ class ALSModel(
   extends MatrixFactorizationModel(rank, userFeatures, productFeatures)
   with IPersistentModel[ALSAlgorithmParams] {
 
-
   def save(id: String, params: ALSAlgorithmParams,
     sc: SparkContext): Boolean = {
-    sc.parallelize(Seq(rank)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/rank")
-    userFeatures.saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/userFeatures")
-    productFeatures.saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/productFeatures")
+    val cal = Calendar.getInstance()
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val todayDate:String = dateFormat.format(cal.getTime())
+    sc.parallelize(Seq(rank)).saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/rank")
+    userFeatures.saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/userFeatures")
+    productFeatures.saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/productFeatures")
     sc.parallelize(Seq(productModels))
-      .saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/productModels")
+      .saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/productModels")
     sc.parallelize(Seq(userStringIntMap))
-      .saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/userStringIntMap")
+      .saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/userStringIntMap")
     sc.parallelize(Seq(itemStringIntMap))
-      .saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/itemStringIntMap")
-    sc.parallelize(Seq(itemsAsIntMap)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/itemsAsIntMap")
-    sc.parallelize(Seq(preparedRecs)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/preparedRecs")
-    sc.parallelize(Seq(twoWeeksAgo)).saveAsObjectFile(s"/home/ubuntu/saved_models/${id}/twoWeeksAgo")
+      .saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/itemStringIntMap")
+    sc.parallelize(Seq(itemsAsIntMap)).saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/itemsAsIntMap")
+    sc.parallelize(Seq(preparedRecs)).saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/preparedRecs")
+    sc.parallelize(Seq(twoWeeksAgo)).saveAsObjectFile(s"/home/ubuntu/saved_models/${todayDate}/twoWeeksAgo")
     true
   }
 
@@ -93,23 +98,35 @@ class ALSModel(
 
 object ALSModel
   extends IPersistentModelLoader[ALSAlgorithmParams, ALSModel] {
-  def apply(id: String, params: ALSAlgorithmParams,
-    sc: Option[SparkContext]) = {
+  def apply(id: String, params: ALSAlgorithmParams, sc: Option[SparkContext]) = {
+    val cal = Calendar.getInstance()
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val todayDate:String = dateFormat.format(cal.getTime())
+    val dir: File = new File("/home/ubuntu/saved_models/")
+    val allDirs: List[String] = dir.listFiles.toList.map(_.toString)
+    val latestModel: String = allDirs.filter{ fullPath =>
+      val modelDirFile: File = new File(fullPath)
+      val modelFileCount: Int = modelDirFile.listFiles.toList.length
+      val dirName: String = fullPath.substring(fullPath.lastIndexOf("/")+1, fullPath.length()) 
+      dirName.matches("\\d{4}-\\d{2}-\\d{2}") && modelFileCount == 9
+    }.sorted.last
+    println(s"loading model from: ${latestModel}")
+
     new ALSModel(
-      rank = sc.get.objectFile[Int](s"/home/ubuntu/saved_models/${id}/rank").first,
-      userFeatures = sc.get.objectFile(s"/home/ubuntu/saved_models/${id}/userFeatures"),
-      productFeatures = sc.get.objectFile(s"/home/ubuntu/saved_models/${id}/productFeatures"),
+      rank = sc.get.objectFile[Int](s"${latestModel}/rank").first,
+      userFeatures = sc.get.objectFile(s"${latestModel}/userFeatures"),
+      productFeatures = sc.get.objectFile(s"${latestModel}/productFeatures"),
       productModels = sc.get
-        .objectFile[Map[Int, ProductModel]](s"/home/ubuntu/saved_models/${id}/productModels").first,
+        .objectFile[Map[Int, ProductModel]](s"${latestModel}/productModels").first,
       userStringIntMap = sc.get
-        .objectFile[BiMap[String, Int]](s"/home/ubuntu/saved_models/${id}/userStringIntMap").first,
+        .objectFile[BiMap[String, Int]](s"${latestModel}/userStringIntMap").first,
       itemStringIntMap = sc.get
-        .objectFile[BiMap[String, Int]](s"/home/ubuntu/saved_models/${id}/itemStringIntMap").first,
+        .objectFile[BiMap[String, Int]](s"${latestModel}/itemStringIntMap").first,
       itemsAsIntMap = sc.get
-        .objectFile[Map[Int, Item]](s"/home/ubuntu/saved_models/${id}/itemsAsIntMap").first,
-      twoWeeksAgo = sc.get.objectFile[String](s"/home/ubuntu/saved_models/${id}/twoWeeksAgo").first,
+        .objectFile[Map[Int, Item]](s"${latestModel}/itemsAsIntMap").first,
+      twoWeeksAgo = sc.get.objectFile[String](s"${latestModel}/twoWeeksAgo").first,
       preparedRecs = sc.get
-        .objectFile[Option[Map[String, Array[ItemScore]]]](s"/home/ubuntu/saved_models/${id}/preparedRecs").first
+        .objectFile[Option[Map[String, Array[ItemScore]]]](s"${latestModel}/preparedRecs").first
     ) 
   }
 }
