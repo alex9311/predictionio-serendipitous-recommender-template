@@ -23,12 +23,14 @@ object LdaSimHelpers {
 
   def calculateEdges(nodes:RDD[(Int,Array[Double])],sc:SparkContext):RDD[(Int,Int,Double)] = {
     val nodeList = nodes.collect().toList
+	/*
     val allDistances: RDD[(Int,Int,Double)] = nodes.flatMap(item1 => nodeList
       .filter(item2 => item2._1 > item1._1)
       .map(item2 => 
         (item1._1, item2._1,cosineDistance(item1._2,item2._2)))
-    )
+    )*/
 
+/*
     println(s"+++++++++total distances found is: ${allDistances.count.toString}")
     val minDistance:Double = allDistances
       .map{case(item1:Int,item2:Int,distance:Double)=>(distance,1)}
@@ -40,7 +42,9 @@ object LdaSimHelpers {
       .sortByKey(false)
       .keys.take(1).head
     println(s"+++++++++maxDistance is: ${maxDistance.toString}")
-
+*/
+   //val distanceCutoff: Double = 0.5
+/*
     val distanceCutoff:Double = allDistances
       .map{case(item1:Int,item2:Int,distance:Double)=>(distance,1)}
       .sortByKey(true)
@@ -48,10 +52,9 @@ object LdaSimHelpers {
       .reverse
       .take(1).head
     println(s"+++++++++distance cutoff is ${distanceCutoff.toString}")
+*/
+    //allDistances.filter{case(item1,item2,distance)=> distance < distanceCutoff}
 
-    allDistances.filter{case(item1,item2,distance)=> distance < distanceCutoff}
-
-/*
     nodes
       .flatMap(item1 => nodeList
         .filter(item2 => item2._1 > item1._1)
@@ -59,7 +62,6 @@ object LdaSimHelpers {
           (item1._1, item2._1,cosineDistance(item1._2,item2._2)))
         .filter{case(item1,item2,distance)=> distance < .5}
     )
-*/
   }
 
   def get_termcount(tokens:Array[String],vocab:Map[String,Int]):mutable.HashMap[Int,Double] = {
