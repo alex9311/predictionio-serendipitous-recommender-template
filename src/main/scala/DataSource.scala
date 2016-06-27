@@ -126,7 +126,7 @@ class DataSource(val dsp: DataSourceParams)
       } 
 
     val edges: RDD[(Int,Int,Double)] = LdaSimHelpers.calculateEdges(itemTopicDistributions,sc)
-    LdaSimHelpers.gephiPrint(edges,docItemInfo)
+    //LdaSimHelpers.gephiPrint(edges,docItemInfo)
 
     edges.map { case(item1:Int,item2:Int,weight:Double) => Edge(item1.toLong,item2.toLong,weight) }
   }
@@ -135,7 +135,7 @@ class DataSource(val dsp: DataSourceParams)
     val corpus: RDD[(Long,Array[String])] = {
        viewEventsRDD.map(event => (event.item,event.user))
         .groupByKey()
-        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 2 }//remove items with less that 2 distinct viewers
+        .filter{ case (itemid,viewers) => viewers.toArray.distinct.size > 3 }//remove items with less that 3 distinct viewers
         .map{ case(itemid,viewers) => (itemid.toLong, viewers.mkString(" ").split("\\s"))}
     }
 

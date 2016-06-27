@@ -222,7 +222,10 @@ class ALSAlgorithm(val ap: ALSAlgorithmParams)
     logger.info(s"getting prepared recs...")
     val preparedRecs: Map[String,Array[ItemScore]] = {
       triangleCounts.map{ case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) =>
-        val preparedRec: Array[(ItemScore,Int)] = potentialWithTriangle.reverse.sortWith(_._2 < _._2).take(4)
+        val totalTriangles: Int = potentialWithTriangle.map{case(itemScore,triCount) => triCount}.reduceLeft[Int](_+_)
+        val preparedRec: Array[(ItemScore,Int)] = { if(totalTriangles == 0 ) { potentialWithTriangle.reverse.take(4) }
+          else { potentialWithTriangle.sortWith(_._2 < _._2).take(4) } }
+//        val preparedRec: Array[(ItemScore,Int)] = potentialWithTriangle/*.reverse*/.sortWith(_._2 < _._2).take(4)
         (userid,preparedRec)
       }
       .map{case(userid:String,potentialWithTriangle:Array[(ItemScore,Int)]) => (userid,potentialWithTriangle.map(x=>x._1))}
