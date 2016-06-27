@@ -5,4 +5,4 @@ This is the recommender used in my Master's thesis project. It provides both bas
 
 Below is a short animation illustrating how the serendipitous algorithm works.
 
-![serendipitous algorithm explanation](resources/gifproject.gif)
+<img src="resources/gifproject.gif" width="600">
