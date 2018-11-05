@@ -9,7 +9,7 @@ Below is a short animation illustrating how the serendipitous algorithm works.
 
 <img src="resources/gifproject.gif" width="600">
 
-##Quick Setup
+## Quick Setup
 - Install PredictionIO, follow their [guide](https://docs.prediction.io/install/)
 - Use pio command line to get this template. This command will copy the template to a directory 'Recommender'
 ```bash
